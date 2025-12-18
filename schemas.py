@@ -1,5 +1,6 @@
 from pydantic import BaseModel, EmailStr, field_validator
 
+
 class SignupSchema(BaseModel):
     name: str
     email: EmailStr
@@ -12,3 +13,22 @@ class SignupSchema(BaseModel):
         if password is not None and v != password:
             raise ValueError("Passwords do not match")
         return v
+
+
+class LoginSchema(BaseModel):
+    email: EmailStr
+    password: str
+
+
+class ChangePasswordSchema(BaseModel):
+    oldPassword: str
+    newPassword: str
+
+
+class ForgotPasswordSchema(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordSchema(BaseModel):
+    token: str
+    newPassword: str
