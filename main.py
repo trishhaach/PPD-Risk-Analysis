@@ -1,11 +1,13 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 import hashlib
+import logging
 import os
 import smtplib
 from email.message import EmailMessage
 from typing import Optional
 
+from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
@@ -16,10 +18,24 @@ from database import init_db, engine
 from models import User
 from schemas import SignupSchema, LoginSchema, ChangePasswordSchema, ForgotPasswordSchema, ResetPasswordSchema
 
+# Set up logging for production debugging
+# Configure logging to output to stdout (works with Render and other platforms)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler()]
+)
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+# Load environment variables from .env file (if it exists)
+# This works locally and in deployment (deployment platforms can override with their own env vars)
+load_dotenv()
 
 # SECURITY: Load secrets from environment variables.
 # In production, set strong random values for these:
 #   SAKHI_SECRET_KEY, SAKHI_PASSWORD_SALT
+# These can be set via .env file locally or environment variables in deployment
 SECRET_KEY = os.getenv("SAKHI_SECRET_KEY", "dev-secret-change-me")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
@@ -55,7 +71,7 @@ def send_welcome_email(to_email: str, name: str) -> None:
     Configure this Gmail account to use an app password (recommended) instead of the raw login password.
     """
     if not SAKHI_EMAIL_ADDRESS or not SAKHI_EMAIL_PASSWORD:
-        # Misconfigured email environment - fail silently to avoid breaking signup flow
+        logger.warning(f"Email credentials not set, skipping welcome email to {to_email}")
         return
 
     msg = EmailMessage()
@@ -71,11 +87,14 @@ def send_welcome_email(to_email: str, name: str) -> None:
     )
 
     try:
+        logger.info(f"Sending welcome email to: {to_email}")
         with smtplib.SMTP("smtp.gmail.com", 587) as server:
             server.starttls()
             server.login(SAKHI_EMAIL_ADDRESS, SAKHI_EMAIL_PASSWORD)
             server.send_message(msg)
-    except Exception:
+        logger.info(f"Welcome email sent successfully to: {to_email}")
+    except Exception as e:
+        logger.error(f"ERROR sending welcome email to {to_email}: {str(e)}", exc_info=True)
         # Avoid raising from background email failures
         return
 
@@ -97,7 +116,9 @@ def send_password_reset_email(to_email: str, token: str) -> None:
     In production, you would replace this with a real frontend URL, e.g.:
       https://your-frontend-url.com/reset-password?token=...
     """
+    logger.info(f"send_password_reset_email called for: {to_email}")
     if not SAKHI_EMAIL_ADDRESS or not SAKHI_EMAIL_PASSWORD:
+        logger.error(f"Email credentials not set. SAKHI_EMAIL_ADDRESS={bool(SAKHI_EMAIL_ADDRESS)}, SAKHI_EMAIL_PASSWORD={bool(SAKHI_EMAIL_PASSWORD)}")
         return
 
     msg = EmailMessage()
@@ -114,11 +135,14 @@ def send_password_reset_email(to_email: str, token: str) -> None:
     )
 
     try:
+        logger.info(f"Attempting to send password reset email to: {to_email}")
         with smtplib.SMTP("smtp.gmail.com", 587) as server:
             server.starttls()
             server.login(SAKHI_EMAIL_ADDRESS, SAKHI_EMAIL_PASSWORD)
             server.send_message(msg)
-    except Exception:
+        logger.info(f"Password reset email sent successfully to: {to_email}")
+    except Exception as e:
+        logger.error(f"ERROR sending password reset email to {to_email}: {str(e)}", exc_info=True)
         return
 
 
@@ -235,21 +259,28 @@ def forgot_password(data: ForgotPasswordSchema, background_tasks: BackgroundTask
     Always return a generic success message to avoid leaking which emails exist.
     """
     try:
+        logger.info(f"Password reset requested for email: {data.email}")
         with Session(engine) as session:
             user = session.query(User).filter(User.email == data.email).first()
 
             if user:
                 # Only generate and send token if user exists
                 reset_token = create_reset_token(user.email)
+                logger.info(f"Generated reset token for user: {user.email}")
+                logger.info(f"Adding background task to send email to: {user.email}")
                 background_tasks.add_task(
                     send_password_reset_email,
                     to_email=user.email,
                     token=reset_token,
                 )
+                logger.info(f"Background task added successfully for: {user.email}")
+            else:
+                logger.info(f"No user found with email: {data.email}")
 
         # Always respond success, even if user not found
         return {"message": "If this email is registered, a reset link has been sent."}
     except Exception as e:
+        logger.error(f"Error in forgot-password endpoint: {str(e)}", exc_info=True)
         raise HTTPException(status_code=503, detail=f"Error processing password reset: {str(e)}")
 
 
