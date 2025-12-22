@@ -88,11 +88,20 @@ def send_welcome_email(to_email: str, name: str) -> None:
 
     try:
         logger.info(f"Sending welcome email to: {to_email}")
-        with smtplib.SMTP("smtp.gmail.com", 587) as server:
-            server.starttls()
-            server.login(SAKHI_EMAIL_ADDRESS, SAKHI_EMAIL_PASSWORD)
-            server.send_message(msg)
-        logger.info(f"Welcome email sent successfully to: {to_email}")
+        # Try SSL on port 465 first (common for cloud providers that block port 587)
+        try:
+            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+                server.login(SAKHI_EMAIL_ADDRESS, SAKHI_EMAIL_PASSWORD)
+                server.send_message(msg)
+            logger.info(f"Welcome email sent successfully to: {to_email} (via SSL)")
+        except Exception as ssl_error:
+            logger.warning(f"SSL connection failed: {ssl_error}, trying STARTTLS on port 587")
+            # Fallback to STARTTLS on port 587
+            with smtplib.SMTP("smtp.gmail.com", 587) as server:
+                server.starttls()
+                server.login(SAKHI_EMAIL_ADDRESS, SAKHI_EMAIL_PASSWORD)
+                server.send_message(msg)
+            logger.info(f"Welcome email sent successfully to: {to_email} (via STARTTLS)")
     except Exception as e:
         logger.error(f"ERROR sending welcome email to {to_email}: {str(e)}", exc_info=True)
         # Avoid raising from background email failures
@@ -136,11 +145,20 @@ def send_password_reset_email(to_email: str, token: str) -> None:
 
     try:
         logger.info(f"Attempting to send password reset email to: {to_email}")
-        with smtplib.SMTP("smtp.gmail.com", 587) as server:
-            server.starttls()
-            server.login(SAKHI_EMAIL_ADDRESS, SAKHI_EMAIL_PASSWORD)
-            server.send_message(msg)
-        logger.info(f"Password reset email sent successfully to: {to_email}")
+        # Try SSL on port 465 first (common for cloud providers that block port 587)
+        try:
+            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+                server.login(SAKHI_EMAIL_ADDRESS, SAKHI_EMAIL_PASSWORD)
+                server.send_message(msg)
+            logger.info(f"Password reset email sent successfully to: {to_email} (via SSL)")
+        except Exception as ssl_error:
+            logger.warning(f"SSL connection failed: {ssl_error}, trying STARTTLS on port 587")
+            # Fallback to STARTTLS on port 587
+            with smtplib.SMTP("smtp.gmail.com", 587) as server:
+                server.starttls()
+                server.login(SAKHI_EMAIL_ADDRESS, SAKHI_EMAIL_PASSWORD)
+                server.send_message(msg)
+            logger.info(f"Password reset email sent successfully to: {to_email} (via STARTTLS)")
     except Exception as e:
         logger.error(f"ERROR sending password reset email to {to_email}: {str(e)}", exc_info=True)
         return
