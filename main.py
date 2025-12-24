@@ -6,8 +6,12 @@ import os
 from typing import Optional
 
 from dotenv import load_dotenv
-import resend
+import smtplib
+from email.message import EmailMessage
+import json
 from fastapi import Depends, FastAPI, HTTPException, BackgroundTasks
+import firebase_admin
+from firebase_admin import credentials, auth
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
@@ -42,13 +46,33 @@ PASSWORD_SALT = os.getenv("SAKHI_PASSWORD_SALT", "dev-salt-change-me")
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
-# Use Resend's default test domain if no email is set (works without domain verification)
-SAKHI_EMAIL_ADDRESS = os.getenv("SAKHI_EMAIL_ADDRESS", "onboarding@resend.dev")
-RESEND_API_KEY = os.getenv("RESEND_API_KEY")
+SAKHI_EMAIL_ADDRESS = os.getenv("SAKHI_EMAIL_ADDRESS", "sakhihealth25@gmail.com")
+SAKHI_EMAIL_PASSWORD = os.getenv("SAKHI_EMAIL_PASSWORD")
 
-# Set Resend API key (will be used by resend.Emails.send())
-if RESEND_API_KEY:
-    resend.api_key = RESEND_API_KEY
+# Firebase configuration
+FIREBASE_SERVICE_ACCOUNT_KEY = os.getenv("FIREBASE_SERVICE_ACCOUNT_KEY")
+
+# Initialize Firebase Admin SDK (optional - only if service account key is provided)
+firebase_app = None
+if FIREBASE_SERVICE_ACCOUNT_KEY:
+    try:
+        # If the key is provided as JSON string in env var, parse it
+        service_account_info = json.loads(FIREBASE_SERVICE_ACCOUNT_KEY)
+        cred = credentials.Certificate(service_account_info)
+        firebase_app = firebase_admin.initialize_app(cred)
+        logger.info("Firebase Admin SDK initialized successfully")
+    except json.JSONDecodeError:
+        # If it's a file path instead, try that
+        try:
+            cred = credentials.Certificate(FIREBASE_SERVICE_ACCOUNT_KEY)
+            firebase_app = firebase_admin.initialize_app(cred)
+            logger.info("Firebase Admin SDK initialized successfully from file")
+        except Exception as e:
+            logger.warning(f"Failed to initialize Firebase: {e}. Firebase features will be disabled.")
+    except Exception as e:
+        logger.warning(f"Failed to initialize Firebase: {e}. Firebase features will be disabled.")
+else:
+    logger.info("Firebase service account key not provided. Firebase features will be disabled.")
 
 
 def get_password_hash(password: str) -> str:
@@ -64,27 +88,55 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     return get_password_hash(plain_password) == hashed_password
 
 
+def generate_firebase_token(user_id: int) -> Optional[str]:
+    """
+    Generate a Firebase custom token for a user.
+    Returns None if Firebase is not configured.
+    """
+    if not firebase_app:
+        return None
+    
+    try:
+        # Convert user ID to string for Firebase UID
+        uid = str(user_id)
+        custom_token = auth.create_custom_token(uid)
+        return custom_token.decode('utf-8')
+    except Exception as e:
+        logger.error(f"Error generating Firebase token: {e}", exc_info=True)
+        return None
+
+
 def send_welcome_email(to_email: str, name: str) -> None:
     """
-    Send a welcome email to the given address using Resend API.
+    Send a welcome email to the given address using Gmail SMTP.
     
     IMPORTANT: Requires environment variables:
-      - SAKHI_EMAIL_ADDRESS (the "from" email address)
-      - RESEND_API_KEY (your Resend API key)
+      - SAKHI_EMAIL_ADDRESS (Gmail address: sakhihealth25@gmail.com)
+      - SAKHI_EMAIL_PASSWORD (Gmail app password)
     """
-    if not RESEND_API_KEY or not SAKHI_EMAIL_ADDRESS:
-        logger.error(f"Resend not configured. RESEND_API_KEY={bool(RESEND_API_KEY)}, SAKHI_EMAIL_ADDRESS={bool(SAKHI_EMAIL_ADDRESS)}")
+    if not SAKHI_EMAIL_ADDRESS or not SAKHI_EMAIL_PASSWORD:
+        logger.warning(f"Email credentials not set, skipping welcome email to {to_email}")
         return
+
+    msg = EmailMessage()
+    msg["From"] = SAKHI_EMAIL_ADDRESS
+    msg["To"] = to_email
+    msg["Subject"] = "Welcome to Sakhi"
+
+    msg.set_content(
+        f"Hi {name},\n\n"
+        "Thank you for choosing us! Welcome to Sakhi.\n\n"
+        "With love,\n"
+        "The Sakhi Team"
+    )
 
     try:
         logger.info(f"Sending welcome email to: {to_email}")
-        response = resend.Emails.send({
-            "from": f"Sakhi <{SAKHI_EMAIL_ADDRESS}>",
-            "to": [to_email],
-            "subject": "Welcome to Sakhi",
-            "text": f"Hi {name},\n\nThank you for choosing us! Welcome to Sakhi.\n\nWith love,\nThe Sakhi Team"
-        })
-        logger.info(f"Welcome email sent successfully to: {to_email}. Resend ID: {response.get('id', 'N/A')}")
+        with smtplib.SMTP("smtp.gmail.com", 587) as server:
+            server.starttls()
+            server.login(SAKHI_EMAIL_ADDRESS, SAKHI_EMAIL_PASSWORD)
+            server.send_message(msg)
+        logger.info(f"Welcome email sent successfully to: {to_email}")
     except Exception as e:
         logger.error(f"ERROR sending welcome email to {to_email}: {str(e)}", exc_info=True)
         # Avoid raising from background email failures
@@ -102,38 +154,41 @@ def create_reset_token(email: str, expires_minutes: int = 30) -> str:
 
 def send_password_reset_email(to_email: str, token: str) -> None:
     """
-    Send password reset email using Resend API.
+    Send password reset email using Gmail SMTP.
     
     While there is no frontend yet, we just send the raw token in the email.
     In production, you would replace this with a real frontend URL, e.g.:
       https://your-frontend-url.com/reset-password?token=...
       
     IMPORTANT: Requires environment variables:
-      - SAKHI_EMAIL_ADDRESS (the "from" email address)
-      - RESEND_API_KEY (your Resend API key)
+      - SAKHI_EMAIL_ADDRESS (Gmail address: sakhihealth25@gmail.com)
+      - SAKHI_EMAIL_PASSWORD (Gmail app password)
     """
     logger.info(f"send_password_reset_email called for: {to_email}")
-    if not RESEND_API_KEY or not SAKHI_EMAIL_ADDRESS:
-        logger.error(f"Resend not configured. RESEND_API_KEY={bool(RESEND_API_KEY)}, SAKHI_EMAIL_ADDRESS={bool(SAKHI_EMAIL_ADDRESS)}")
+    if not SAKHI_EMAIL_ADDRESS or not SAKHI_EMAIL_PASSWORD:
+        logger.error(f"Email credentials not set. SAKHI_EMAIL_ADDRESS={bool(SAKHI_EMAIL_ADDRESS)}, SAKHI_EMAIL_PASSWORD={bool(SAKHI_EMAIL_PASSWORD)}")
         return
+
+    msg = EmailMessage()
+    msg["From"] = SAKHI_EMAIL_ADDRESS
+    msg["To"] = to_email
+    msg["Subject"] = "Reset your Sakhi password"
+
+    msg.set_content(
+        "You requested to reset your Sakhi password.\n\n"
+        "For now (development mode), here is your reset token:\n"
+        f"{token}\n\n"
+        "Use this token in the /reset-password API.\n\n"
+        "If you did not request this, you can ignore this email.\n"
+    )
 
     try:
         logger.info(f"Attempting to send password reset email to: {to_email}")
-        email_body = (
-            "You requested to reset your Sakhi password.\n\n"
-            "For now (development mode), here is your reset token:\n"
-            f"{token}\n\n"
-            "Use this token in the /reset-password API.\n\n"
-            "If you did not request this, you can ignore this email.\n"
-        )
-        
-        response = resend.Emails.send({
-            "from": f"Sakhi <{SAKHI_EMAIL_ADDRESS}>",
-            "to": [to_email],
-            "subject": "Reset your Sakhi password",
-            "text": email_body
-        })
-        logger.info(f"Password reset email sent successfully to: {to_email}. Resend ID: {response.get('id', 'N/A')}")
+        with smtplib.SMTP("smtp.gmail.com", 587) as server:
+            server.starttls()
+            server.login(SAKHI_EMAIL_ADDRESS, SAKHI_EMAIL_PASSWORD)
+            server.send_message(msg)
+        logger.info(f"Password reset email sent successfully to: {to_email}")
     except Exception as e:
         logger.error(f"ERROR sending password reset email to {to_email}: {str(e)}", exc_info=True)
         return
@@ -209,11 +264,28 @@ def signup(data: SignupSchema, background_tasks: BackgroundTasks):
 
             # Send welcome email in the background so signup response is fast
             background_tasks.add_task(send_welcome_email, to_email=new_user.email, name=new_user.name)
+            
+            # Generate access token and Firebase custom token
+            access_token = create_access_token({"sub": new_user.email})
+            firebase_token = generate_firebase_token(new_user.id)
 
-            return {
+            response_data = {
                 "message": f"User {data.name} signed up successfully!",
                 "email": data.email,
+                "access_token": access_token,
+                "token_type": "bearer",
+                "user": {
+                    "id": new_user.id,
+                    "email": new_user.email,
+                    "name": new_user.name
+                }
             }
+            
+            # Add Firebase token if available
+            if firebase_token:
+                response_data["firebase_token"] = firebase_token
+
+            return response_data
     except HTTPException:
         raise
     except Exception as e:
@@ -231,14 +303,28 @@ def login(data: LoginSchema):
                 raise HTTPException(status_code=401, detail="Invalid email or password")
             
             access_token = create_access_token({"sub": user.email})
+            
+            # Generate Firebase custom token
+            firebase_token = generate_firebase_token(user.id)
 
-            return {
+            response_data = {
                 "message": "Login successful!",
                 "email": user.email,
                 "name": user.name,
                 "access_token": access_token,
                 "token_type": "bearer",
+                "user": {
+                    "id": user.id,
+                    "email": user.email,
+                    "name": user.name
+                }
             }
+            
+            # Add Firebase token if available
+            if firebase_token:
+                response_data["firebase_token"] = firebase_token
+            
+            return response_data
     except HTTPException:
         raise
     except Exception as e:

@@ -26,6 +26,11 @@ ENV/
 .env
 .env.local
 
+# Firebase service account keys (NEVER commit these!)
+serviceAccountKey.json
+*serviceAccountKey*.json
+firebase-service-account.json
+
 # OS
 .DS_Store
 Thumbs.db
