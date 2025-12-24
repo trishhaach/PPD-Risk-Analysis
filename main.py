@@ -42,7 +42,8 @@ PASSWORD_SALT = os.getenv("SAKHI_PASSWORD_SALT", "dev-salt-change-me")
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
-SAKHI_EMAIL_ADDRESS = os.getenv("SAKHI_EMAIL_ADDRESS")
+# Use Resend's default test domain if no email is set (works without domain verification)
+SAKHI_EMAIL_ADDRESS = os.getenv("SAKHI_EMAIL_ADDRESS", "onboarding@resend.dev")
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
 
 # Set Resend API key (will be used by resend.Emails.send())
