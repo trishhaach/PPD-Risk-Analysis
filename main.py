@@ -19,7 +19,7 @@ from sqlmodel import Session
 
 from database import init_db, engine
 from models import User
-from schemas import SignupSchema, LoginSchema, ChangePasswordSchema, ForgotPasswordSchema, ResetPasswordSchema
+from schemas import SignupSchema, LoginSchema, ChangePasswordSchema, ForgotPasswordSchema, ResetPasswordSchema, UpdateNameSchema
 
 # Set up logging for production debugging
 # Configure logging to output to stdout (works with Render and other platforms)
@@ -209,17 +209,23 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
+        logger.info(f"Attempting to validate token (first 20 chars): {token[:20] if token else 'None'}...")
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         email: Optional[str] = payload.get("sub")
+        logger.info(f"Token decoded successfully for email: {email}")
         if email is None:
+            logger.warning("Token payload missing 'sub' field")
             raise credentials_exception
-    except JWTError:
+    except JWTError as e:
+        logger.error(f"JWT decode error: {str(e)}")
         raise credentials_exception
 
     with Session(engine) as session:
         user = session.query(User).filter(User.email == email).first()
         if user is None:
+            logger.warning(f"User not found for email: {email}")
             raise credentials_exception
+        logger.info(f"User authenticated successfully: {user.email}")
         return user
 
 @asynccontextmanager
@@ -425,6 +431,34 @@ def change_password(data: ChangePasswordSchema, current_user: User = Depends(get
 
             return {
                 "message": "Password changed successfully"
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Database connection error: {str(e)}")
+
+
+@app.patch("/update-name")
+def update_name(data: UpdateNameSchema, current_user: User = Depends(get_current_user)):
+    """
+    Update the authenticated user's name.
+    """
+    try:
+        with Session(engine) as session:
+            user = session.query(User).filter(User.id == current_user.id).first()
+            if not user:
+                raise HTTPException(status_code=404, detail="User not found")
+
+            # Update name
+            user.name = data.name
+            session.add(user)
+            session.commit()
+            session.refresh(user)
+
+            return {
+                "message": "Name updated successfully",
+                "name": user.name,
+                "email": user.email
             }
     except HTTPException:
         raise

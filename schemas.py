@@ -32,3 +32,7 @@ class ForgotPasswordSchema(BaseModel):
 class ResetPasswordSchema(BaseModel):
     token: str
     newPassword: str
+
+
+class UpdateNameSchema(BaseModel):
+    name: str
