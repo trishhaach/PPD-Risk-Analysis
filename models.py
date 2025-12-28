@@ -1,6 +1,6 @@
 from sqlmodel import SQLModel, Field
-from sqlalchemy import Column, String, Integer, DateTime
-from typing import Optional
+from sqlalchemy import Column, String, Integer, DateTime, Text, Boolean, ARRAY, JSON
+from typing import Optional, List
 from datetime import datetime
 
 class User(SQLModel, table=True):
@@ -33,3 +33,22 @@ class EPDSResult(SQLModel, table=True):
     
     # Timestamp
     created_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
+
+
+class Blog(SQLModel, table=True):
+    """Model to store blog posts"""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    title: str = Field(sa_column=Column(String(60), nullable=False))
+    slug: str = Field(sa_column=Column(String(100), unique=True, nullable=False))
+    meta: str = Field(sa_column=Column(String(160), nullable=False))  # SEO meta description
+    desc: str = Field(sa_column=Column(Text, nullable=False))  # HTML content
+    preview: Optional[str] = Field(default=None, sa_column=Column(Text))  # JSON string of layout
+    cover: str = Field(sa_column=Column(String(500), nullable=False))  # Image URL
+    cover_key: str = Field(sa_column=Column(String(500), nullable=False))  # S3/storage key
+    tags: str = Field(sa_column=Column(Text, nullable=False))  # JSON array as string ["tag1", "tag2"]
+    category: str = Field(sa_column=Column(Text, nullable=False))  # JSON array as string ["cat1"]
+    toc: Optional[str] = Field(default=None, sa_column=Column(Text))  # JSON array as string
+    is_published: bool = Field(default=False, sa_column=Column(Boolean, nullable=False))
+    created_by_id: int = Field(foreign_key="user.id", nullable=False)
+    created_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
+    updated_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime))

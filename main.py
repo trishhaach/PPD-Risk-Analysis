@@ -9,7 +9,35 @@ from dotenv import load_dotenv
 import smtplib
 from email.message import EmailMessage
 import json
-from fastapi import Depends, FastAPI, HTTPException, BackgroundTasks
+from fastapi import Depends, FastAPI, HTTPException, BackgroundTasks, Query, File, UploadFile
+from fastapi.responses import JSONResponse
+
+# Set up logging first (before Supabase import)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler()]
+)
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+# Set up logging first (before Supabase import)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler()]
+)
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+# Supabase imports - handle gracefully if not available
+try:
+    from supabase import create_client, Client
+    SUPABASE_AVAILABLE = True
+except ImportError:
+    SUPABASE_AVAILABLE = False
+    Client = None
+    logger.warning("Supabase package not fully installed. Storage will use local fallback.")
 import firebase_admin
 from firebase_admin import credentials, auth
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,18 +46,14 @@ from jose import JWTError, jwt
 from sqlmodel import Session
 
 from database import init_db, engine
-from models import User, EPDSResult
-from schemas import SignupSchema, LoginSchema, ChangePasswordSchema, ForgotPasswordSchema, ResetPasswordSchema, UpdateNameSchema, EPDSAnswerSchema
-
-# Set up logging for production debugging
-# Configure logging to output to stdout (works with Render and other platforms)
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler()]
+from models import User, EPDSResult, Blog
+from schemas import (
+    SignupSchema, LoginSchema, ChangePasswordSchema, ForgotPasswordSchema, 
+    ResetPasswordSchema, UpdateNameSchema, EPDSAnswerSchema,
+    BlogCreateSchema, BlogUpdateSchema, BlogListItemSchema, BlogDetailSchema, CreatedBySchema
 )
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+
+# Logging is already set up above (before Supabase import)
 
 # Load environment variables from .env file (if it exists)
 # This works locally and in deployment (deployment platforms can override with their own env vars)
@@ -43,6 +67,24 @@ SECRET_KEY = os.getenv("SAKHI_SECRET_KEY", "dev-secret-change-me")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 PASSWORD_SALT = os.getenv("SAKHI_PASSWORD_SALT", "dev-salt-change-me")
+
+# Supabase Storage Configuration
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")  # Service role key (for admin operations)
+SUPABASE_STORAGE_BUCKET = os.getenv("SUPABASE_STORAGE_BUCKET", "blog-images")
+USE_SUPABASE_STORAGE = os.getenv("USE_SUPABASE_STORAGE", "true").lower() == "true"  # Default to true if using Supabase
+
+# Initialize Supabase client if credentials are provided
+supabase_client: Optional[Client] = None
+if SUPABASE_AVAILABLE and USE_SUPABASE_STORAGE and SUPABASE_URL and SUPABASE_KEY:
+    try:
+        supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        logger.info("Supabase Storage client initialized successfully")
+    except Exception as e:
+        logger.warning(f"Failed to initialize Supabase client: {str(e)}. Falling back to local storage.")
+        supabase_client = None
+elif USE_SUPABASE_STORAGE and not SUPABASE_AVAILABLE:
+    logger.warning("Supabase Storage requested but package not available. Using local storage.")
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
@@ -655,3 +697,414 @@ def get_epds_result(result_id: int, current_user: User = Depends(get_current_use
     except Exception as e:
         logger.error(f"Error fetching EPDS result: {str(e)}", exc_info=True)
         raise HTTPException(status_code=503, detail=f"Error fetching screening result: {str(e)}")
+
+
+# ==================== BLOG API ENDPOINTS ====================
+
+@app.get("/blogs")
+def get_all_blogs(
+    page: int = Query(1, ge=1, description="Page number (starts from 1)"),
+    limit: int = Query(10, ge=1, le=100, description="Number of blogs per page"),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get paginated list of all blogs.
+    """
+    try:
+        with Session(engine) as session:
+            # Calculate offset
+            offset = (page - 1) * limit
+            
+            # Get total count
+            total = session.query(Blog).count()
+            
+            # Get blogs with pagination
+            blogs = session.query(Blog).order_by(Blog.created_at.desc()).offset(offset).limit(limit).all()
+            
+            # Get user info for each blog
+            blog_list = []
+            for blog in blogs:
+                creator = session.query(User).filter(User.id == blog.created_by_id).first()
+                if creator:
+                    blog_list.append({
+                        "id": str(blog.id),
+                        "title": blog.title,
+                        "slug": blog.slug,
+                        "cover": blog.cover,
+                        "isPublished": blog.is_published,
+                        "tags": json.loads(blog.tags) if blog.tags else [],
+                        "category": json.loads(blog.category) if blog.category else [],
+                        "createdBy": {
+                            "id": str(creator.id),
+                            "name": creator.name
+                        },
+                        "createdAt": blog.created_at.isoformat(),
+                        "meta": blog.meta
+                    })
+            
+            # Check if there's a next page
+            has_next = (offset + limit) < total
+            
+            return {
+                "data": blog_list,
+                "paginate": {
+                    "total": total,
+                    "hasNext": has_next
+                }
+            }
+    except Exception as e:
+        logger.error(f"Error fetching blogs: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error fetching blogs: {str(e)}")
+
+
+@app.get("/blogs/{slug}")
+def get_blog_by_slug(slug: str, current_user: User = Depends(get_current_user)):
+    """
+    Get a single blog by slug for editing.
+    """
+    try:
+        with Session(engine) as session:
+            blog = session.query(Blog).filter(Blog.slug == slug).first()
+            
+            if not blog:
+                raise HTTPException(status_code=404, detail="Blog not found")
+            
+            creator = session.query(User).filter(User.id == blog.created_by_id).first()
+            if not creator:
+                raise HTTPException(status_code=404, detail="Blog creator not found")
+            
+            # Parse JSON fields
+            tags = json.loads(blog.tags) if blog.tags else []
+            category = json.loads(blog.category) if blog.category else []
+            toc = json.loads(blog.toc) if blog.toc else None
+            
+            return {
+                "data": {
+                    "id": str(blog.id),
+                    "title": blog.title,
+                    "slug": blog.slug,
+                    "cover": blog.cover,
+                    "cover_key": blog.cover_key,
+                    "meta": blog.meta,
+                    "desc": blog.desc,
+                    "preview": blog.preview,
+                    "tags": tags,
+                    "category": category,
+                    "toc": toc,
+                    "isPublished": blog.is_published,
+                    "createdBy": {
+                        "id": str(creator.id),
+                        "name": creator.name
+                    },
+                    "createdAt": blog.created_at.isoformat()
+                }
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching blog: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error fetching blog: {str(e)}")
+
+
+@app.post("/blogs")
+def create_blog(blog_data: BlogCreateSchema, current_user: User = Depends(get_current_user)):
+    """
+    Create a new blog.
+    """
+    try:
+        with Session(engine) as session:
+            # Check if slug already exists
+            existing_blog = session.query(Blog).filter(Blog.slug == blog_data.slug).first()
+            if existing_blog:
+                raise HTTPException(status_code=400, detail="A blog with this slug already exists")
+            
+            # Prepare JSON strings for tags, category, and toc
+            tags_json = json.dumps(blog_data.tags)
+            category_json = json.dumps(blog_data.category)
+            toc_json = json.dumps([toc.model_dump() for toc in blog_data.toc]) if blog_data.toc else None
+            
+            # Create blog
+            new_blog = Blog(
+                title=blog_data.title,
+                slug=blog_data.slug,
+                meta=blog_data.meta,
+                desc=blog_data.desc,
+                preview=blog_data.preview,
+                cover=blog_data.cover,
+                cover_key=blog_data.cover_key,
+                tags=tags_json,
+                category=category_json,
+                toc=toc_json,
+                is_published=False,
+                created_by_id=current_user.id
+            )
+            
+            session.add(new_blog)
+            session.commit()
+            session.refresh(new_blog)
+            
+            # Get creator info
+            creator = session.query(User).filter(User.id == new_blog.created_by_id).first()
+            
+            # Parse JSON fields for response
+            tags = json.loads(new_blog.tags) if new_blog.tags else []
+            category = json.loads(new_blog.category) if new_blog.category else []
+            toc = json.loads(new_blog.toc) if new_blog.toc else None
+            
+            return {
+                "data": {
+                    "id": str(new_blog.id),
+                    "title": new_blog.title,
+                    "slug": new_blog.slug,
+                    "cover": new_blog.cover,
+                    "cover_key": new_blog.cover_key,
+                    "meta": new_blog.meta,
+                    "desc": new_blog.desc,
+                    "preview": new_blog.preview,
+                    "tags": tags,
+                    "category": category,
+                    "toc": toc,
+                    "isPublished": new_blog.is_published,
+                    "createdBy": {
+                        "id": str(creator.id) if creator else str(current_user.id),
+                        "name": creator.name if creator else current_user.name
+                    },
+                    "createdAt": new_blog.created_at.isoformat()
+                }
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating blog: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error creating blog: {str(e)}")
+
+
+@app.patch("/blogs/{id}")
+def update_blog(id: int, blog_data: BlogUpdateSchema, current_user: User = Depends(get_current_user)):
+    """
+    Update an existing blog.
+    """
+    try:
+        with Session(engine) as session:
+            blog = session.query(Blog).filter(Blog.id == id).first()
+            
+            if not blog:
+                raise HTTPException(status_code=404, detail="Blog not found")
+            
+            # Check if user is the creator (optional: can remove if admins should edit all)
+            if blog.created_by_id != current_user.id:
+                raise HTTPException(status_code=403, detail="You don't have permission to edit this blog")
+            
+            # Update fields if provided
+            if blog_data.title is not None:
+                blog.title = blog_data.title
+            if blog_data.slug is not None:
+                # Check if new slug conflicts with existing blog
+                existing = session.query(Blog).filter(Blog.slug == blog_data.slug, Blog.id != id).first()
+                if existing:
+                    raise HTTPException(status_code=400, detail="A blog with this slug already exists")
+                blog.slug = blog_data.slug
+            if blog_data.meta is not None:
+                blog.meta = blog_data.meta
+            if blog_data.desc is not None:
+                blog.desc = blog_data.desc
+            if blog_data.preview is not None:
+                blog.preview = blog_data.preview
+            if blog_data.cover is not None:
+                blog.cover = blog_data.cover
+            if blog_data.cover_key is not None:
+                blog.cover_key = blog_data.cover_key
+            if blog_data.tags is not None:
+                blog.tags = json.dumps(blog_data.tags)
+            if blog_data.category is not None:
+                blog.category = json.dumps(blog_data.category)
+            if blog_data.toc is not None:
+                blog.toc = json.dumps([toc.model_dump() for toc in blog_data.toc])
+            
+            blog.updated_at = datetime.utcnow()
+            
+            session.add(blog)
+            session.commit()
+            session.refresh(blog)
+            
+            # Get creator info
+            creator = session.query(User).filter(User.id == blog.created_by_id).first()
+            
+            # Parse JSON fields
+            tags = json.loads(blog.tags) if blog.tags else []
+            category = json.loads(blog.category) if blog.category else []
+            toc = json.loads(blog.toc) if blog.toc else None
+            
+            return {
+                "data": {
+                    "id": str(blog.id),
+                    "title": blog.title,
+                    "slug": blog.slug,
+                    "cover": blog.cover,
+                    "cover_key": blog.cover_key,
+                    "meta": blog.meta,
+                    "desc": blog.desc,
+                    "preview": blog.preview,
+                    "tags": tags,
+                    "category": category,
+                    "toc": toc,
+                    "isPublished": blog.is_published,
+                    "createdBy": {
+                        "id": str(creator.id) if creator else str(blog.created_by_id),
+                        "name": creator.name if creator else "Unknown"
+                    },
+                    "createdAt": blog.created_at.isoformat()
+                }
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating blog: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error updating blog: {str(e)}")
+
+
+@app.delete("/blogs/{id}")
+def delete_blog(id: int, current_user: User = Depends(get_current_user)):
+    """
+    Delete a blog.
+    """
+    try:
+        with Session(engine) as session:
+            blog = session.query(Blog).filter(Blog.id == id).first()
+            
+            if not blog:
+                raise HTTPException(status_code=404, detail="Blog not found")
+            
+            # Check if user is the creator (optional: can remove if admins should delete all)
+            if blog.created_by_id != current_user.id:
+                raise HTTPException(status_code=403, detail="You don't have permission to delete this blog")
+            
+            session.delete(blog)
+            session.commit()
+            
+            return {
+                "data": {
+                    "success": True,
+                    "message": "Blog deleted successfully"
+                }
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting blog: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error deleting blog: {str(e)}")
+
+
+@app.patch("/blogs/publish/{id}")
+def toggle_publish_blog(id: int, current_user: User = Depends(get_current_user)):
+    """
+    Toggle publish status of a blog (publish or unpublish).
+    """
+    try:
+        with Session(engine) as session:
+            blog = session.query(Blog).filter(Blog.id == id).first()
+            
+            if not blog:
+                raise HTTPException(status_code=404, detail="Blog not found")
+            
+            # Check if user is the creator
+            if blog.created_by_id != current_user.id:
+                raise HTTPException(status_code=403, detail="You don't have permission to publish/unpublish this blog")
+            
+            # Toggle publish status
+            blog.is_published = not blog.is_published
+            blog.updated_at = datetime.utcnow()
+            
+            session.add(blog)
+            session.commit()
+            
+            status_message = "published" if blog.is_published else "unpublished"
+            
+            return {
+                "data": {
+                    "success": True,
+                    "message": f"Blog {status_message} successfully"
+                }
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error toggling publish status: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error toggling publish status: {str(e)}")
+
+
+@app.post("/blogs/upload-blog-file")
+async def upload_blog_file(
+    file: UploadFile = File(...),
+    path: Optional[str] = Query(None, description="Storage path/folder name"),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Upload images (cover images, content images) for blog.
+    Returns the storage key/path to be used in cover_key field.
+    Uses S3 in production, local storage in development.
+    """
+    try:
+        # Validate file type (images only)
+        if not file.content_type or not file.content_type.startswith('image/'):
+            raise HTTPException(status_code=400, detail="File must be an image")
+        
+        # Generate unique filename
+        file_extension = os.path.splitext(file.filename)[1] if file.filename else ".jpg"
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        unique_filename = f"{timestamp}_{current_user.id}{file_extension}"
+        
+        # Read file content
+        content = await file.read()
+        
+        # Determine storage path
+        storage_folder = path or "blog-images"
+        storage_key = f"{storage_folder}/{unique_filename}"
+        
+        # Use Supabase Storage if configured, otherwise use local storage
+        if supabase_client and USE_SUPABASE_STORAGE:
+            # Upload to Supabase Storage
+            try:
+                # Upload file to Supabase Storage
+                response = supabase_client.storage.from_(SUPABASE_STORAGE_BUCKET).upload(
+                    path=storage_key,
+                    file=content,
+                    file_options={"content-type": file.content_type, "upsert": "true"}
+                )
+                
+                # Get public URL
+                public_url_response = supabase_client.storage.from_(SUPABASE_STORAGE_BUCKET).get_public_url(storage_key)
+                public_url = public_url_response
+                
+                logger.info(f"File uploaded to Supabase Storage: {storage_key}")
+                
+                return {
+                    "key": storage_key,
+                    "url": public_url  # Return both key and URL for convenience
+                }
+            except Exception as e:
+                logger.error(f"Supabase Storage upload error: {str(e)}", exc_info=True)
+                raise HTTPException(status_code=503, detail=f"Error uploading to Supabase Storage: {str(e)}")
+        else:
+            # Local storage fallback (for development)
+            upload_dir = os.path.join("uploads", storage_folder)
+            os.makedirs(upload_dir, exist_ok=True)
+            
+            file_path = os.path.join(upload_dir, unique_filename)
+            
+            # Save file locally
+            with open(file_path, "wb") as buffer:
+                buffer.write(content)
+            
+            logger.info(f"File saved locally: {file_path}")
+            
+            return {
+                "key": storage_key,
+                "url": f"/uploads/{storage_key}"  # Relative URL for local files
+            }
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error uploading file: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error uploading file: {str(e)}")
