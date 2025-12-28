@@ -18,8 +18,8 @@ from jose import JWTError, jwt
 from sqlmodel import Session
 
 from database import init_db, engine
-from models import User
-from schemas import SignupSchema, LoginSchema, ChangePasswordSchema, ForgotPasswordSchema, ResetPasswordSchema, UpdateNameSchema
+from models import User, EPDSResult
+from schemas import SignupSchema, LoginSchema, ChangePasswordSchema, ForgotPasswordSchema, ResetPasswordSchema, UpdateNameSchema, EPDSAnswerSchema
 
 # Set up logging for production debugging
 # Configure logging to output to stdout (works with Render and other platforms)
@@ -484,3 +484,174 @@ def delete_account(current_user: User = Depends(get_current_user)):
         raise
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Database connection error: {str(e)}")
+
+
+def calculate_epds_score(answers: EPDSAnswerSchema) -> tuple[int, str]:
+    """
+    Calculate EPDS total score and risk level.
+    
+    Scoring rules:
+    - Questions 1, 2, 4 (*): Scored 0, 1, 2, 3 (top to bottom)
+    - Questions 3, 5-10: Scored 3, 2, 1, 0 (top to bottom)
+    
+    The frontend should send answers as 0-3 based on the scoring criteria.
+    We just sum them up here.
+    
+    Risk levels:
+    - 0-9: Low risk
+    - 10-12: Moderate risk
+    - 13-30: High risk
+    """
+    total = (
+        answers.q1 + answers.q2 + answers.q3 + answers.q4 + answers.q5 +
+        answers.q6 + answers.q7 + answers.q8 + answers.q9 + answers.q10
+    )
+    
+    # Determine risk level
+    if total <= 9:
+        risk_level = "low"
+    elif total <= 12:
+        risk_level = "moderate"
+    else:
+        risk_level = "high"
+    
+    return total, risk_level
+
+
+@app.post("/epds-screen")
+def submit_epds_screening(
+    answers: EPDSAnswerSchema,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Submit EPDS screening answers and get calculated results.
+    
+    The frontend should send answers as integers 0-3 based on:
+    - Questions 1, 2, 4: 0 (best) to 3 (worst)
+    - Questions 3, 5-10: 3 (worst) to 0 (best)
+    """
+    try:
+        # Calculate total score and risk level
+        total_score, risk_level = calculate_epds_score(answers)
+        
+        # Store result in database
+        with Session(engine) as session:
+            epds_result = EPDSResult(
+                user_id=current_user.id,
+                q1=answers.q1,
+                q2=answers.q2,
+                q3=answers.q3,
+                q4=answers.q4,
+                q5=answers.q5,
+                q6=answers.q6,
+                q7=answers.q7,
+                q8=answers.q8,
+                q9=answers.q9,
+                q10=answers.q10,
+                total_score=total_score,
+                risk_level=risk_level
+            )
+            
+            session.add(epds_result)
+            session.commit()
+            session.refresh(epds_result)
+            
+            return {
+                "message": "EPDS screening completed successfully",
+                "result": {
+                    "id": epds_result.id,
+                    "total_score": total_score,
+                    "risk_level": risk_level,
+                    "answers": {
+                        "q1": answers.q1,
+                        "q2": answers.q2,
+                        "q3": answers.q3,
+                        "q4": answers.q4,
+                        "q5": answers.q5,
+                        "q6": answers.q6,
+                        "q7": answers.q7,
+                        "q8": answers.q8,
+                        "q9": answers.q9,
+                        "q10": answers.q10,
+                    },
+                    "created_at": epds_result.created_at.isoformat()
+                },
+                "interpretation": {
+                    "low": "Score 0-9: Low risk of postpartum depression",
+                    "moderate": "Score 10-12: Moderate risk - consider monitoring or support",
+                    "high": "Score 13-30: High risk - please consult with a healthcare provider"
+                }[risk_level]
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in EPDS screening: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error processing EPDS screening: {str(e)}")
+
+
+@app.get("/epds-screen/history")
+def get_epds_history(current_user: User = Depends(get_current_user)):
+    """
+    Get the user's EPDS screening history.
+    """
+    try:
+        with Session(engine) as session:
+            results = session.query(EPDSResult).filter(
+                EPDSResult.user_id == current_user.id
+            ).order_by(EPDSResult.created_at.desc()).all()
+            
+            return {
+                "history": [
+                    {
+                        "id": result.id,
+                        "total_score": result.total_score,
+                        "risk_level": result.risk_level,
+                        "created_at": result.created_at.isoformat()
+                    }
+                    for result in results
+                ],
+                "count": len(results)
+            }
+    except Exception as e:
+        logger.error(f"Error fetching EPDS history: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error fetching screening history: {str(e)}")
+
+
+@app.get("/epds-screen/{result_id}")
+def get_epds_result(result_id: int, current_user: User = Depends(get_current_user)):
+    """
+    Get a specific EPDS screening result by ID.
+    """
+    try:
+        with Session(engine) as session:
+            result = session.query(EPDSResult).filter(
+                EPDSResult.id == result_id,
+                EPDSResult.user_id == current_user.id
+            ).first()
+            
+            if not result:
+                raise HTTPException(status_code=404, detail="EPDS screening result not found")
+            
+            return {
+                "id": result.id,
+                "total_score": result.total_score,
+                "risk_level": result.risk_level,
+                "answers": {
+                    "q1": result.q1,
+                    "q2": result.q2,
+                    "q3": result.q3,
+                    "q4": result.q4,
+                    "q5": result.q5,
+                    "q6": result.q6,
+                    "q7": result.q7,
+                    "q8": result.q8,
+                    "q9": result.q9,
+                    "q10": result.q10,
+                },
+                "created_at": result.created_at.isoformat()
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching EPDS result: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error fetching screening result: {str(e)}")
