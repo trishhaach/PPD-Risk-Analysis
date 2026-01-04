@@ -46,11 +46,14 @@ from jose import JWTError, jwt
 from sqlmodel import Session
 
 from database import init_db, engine
-from models import User, EPDSResult, Blog
+from models import User, EPDSResult, Blog, Category, CommunityPost, Group, GroupPost
 from schemas import (
     SignupSchema, LoginSchema, ChangePasswordSchema, ForgotPasswordSchema, 
     ResetPasswordSchema, UpdateNameSchema, EPDSAnswerSchema,
-    BlogCreateSchema, BlogUpdateSchema, BlogListItemSchema, BlogDetailSchema, CreatedBySchema
+    BlogCreateSchema, BlogUpdateSchema, BlogListItemSchema, BlogDetailSchema, CreatedBySchema,
+    CreatePostSchema, CategoryResponseSchema, UserResponseSchema, ViewPostResponseSchema,
+    CreateCategorySchema, UpdatePostSchema, CreateGroupSchema, UpdateGroupSchema, ViewGroupResponseSchema,
+    CreateGroupPostSchema, UpdateGroupPostSchema, ViewGroupPostResponseSchema
 )
 
 # Logging is already set up above (before Supabase import)
@@ -444,6 +447,24 @@ def reset_password(data: ResetPasswordSchema):
         raise
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Error resetting password: {str(e)}")
+
+
+@app.post("/logout")
+def logout(current_user: User = Depends(get_current_user)):
+    """
+    Logout the authenticated user.
+    Note: Since we use stateless JWT tokens, the client should delete the token.
+    This endpoint confirms logout and logs the action.
+    """
+    try:
+        logger.info(f"User {current_user.email} logged out")
+        return {
+            "message": "Logged out successfully",
+            "email": current_user.email
+        }
+    except Exception as e:
+        logger.error(f"Error in logout endpoint: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error processing logout: {str(e)}")
 
 
 @app.get("/profile-view")
@@ -1108,3 +1129,892 @@ async def upload_blog_file(
     except Exception as e:
         logger.error(f"Error uploading file: {str(e)}", exc_info=True)
         raise HTTPException(status_code=503, detail=f"Error uploading file: {str(e)}")
+
+
+# ==================== COMMUNITY API ENDPOINTS ====================
+
+@app.post("/community/create-post")
+def create_post(data: CreatePostSchema, current_user: User = Depends(get_current_user)):
+    """
+    Create a new community post/feed.
+    """
+    try:
+        with Session(engine) as session:
+            # Validate category exists
+            # Handle categoryId as "cat_001" format or integer
+            category_id = None
+            if data.categoryId.startswith("cat_"):
+                try:
+                    category_id = int(data.categoryId.replace("cat_", ""))
+                except ValueError:
+                    raise HTTPException(status_code=400, detail="Invalid categoryId format")
+            else:
+                try:
+                    category_id = int(data.categoryId)
+                except ValueError:
+                    raise HTTPException(status_code=400, detail="Invalid categoryId format")
+            
+            category = session.query(Category).filter(Category.id == category_id).first()
+            if not category:
+                raise HTTPException(status_code=404, detail="Category not found")
+            
+            # Create new post
+            new_post = CommunityPost(
+                title=data.title,
+                body=data.body,
+                image=data.image,
+                tags=json.dumps(data.tags),
+                category_id=category_id,
+                post_type=data.postType,
+                user_id=current_user.id
+            )
+            
+            session.add(new_post)
+            session.commit()
+            session.refresh(new_post)
+            
+            return {
+                "message": "Post created successfully",
+                "id": f"post_{new_post.id}"
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating post: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error creating post: {str(e)}")
+
+
+@app.get("/community/view-post")
+def view_posts(current_user: User = Depends(get_current_user)):
+    """
+    Get all community posts/feeds.
+    """
+    try:
+        with Session(engine) as session:
+            posts = session.query(CommunityPost).order_by(CommunityPost.created_at.desc()).all()
+            
+            post_list = []
+            for post in posts:
+                # Get user info
+                user = session.query(User).filter(User.id == post.user_id).first()
+                if not user:
+                    continue
+                
+                # Get category info
+                category = session.query(Category).filter(Category.id == post.category_id).first()
+                if not category:
+                    continue
+                
+                post_list.append({
+                    "id": f"post_{post.id}",
+                    "title": post.title,
+                    "body": post.body,
+                    "image": post.image,
+                    "tags": json.loads(post.tags) if post.tags else [],
+                    "category": {
+                        "id": f"cat_{category.id:03d}",
+                        "name": category.name
+                    },
+                    "postType": post.post_type,
+                    "user": {
+                        "id": f"user_{user.id}",
+                        "name": user.name
+                    },
+                    "postedTime": post.created_at.isoformat()
+                })
+            
+            return post_list
+    except Exception as e:
+        logger.error(f"Error fetching posts: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error fetching posts: {str(e)}")
+
+
+@app.patch("/community/update-post/{post_id}")
+def update_post(post_id: int, post_data: UpdatePostSchema, current_user: User = Depends(get_current_user)):
+    """
+    Update an existing community post.
+    Only the post creator can update their own post.
+    Use the numeric ID (e.g., 1, 2, 3) not "post_1" format.
+    """
+    try:
+        with Session(engine) as session:
+            
+            post = session.query(CommunityPost).filter(CommunityPost.id == post_id).first()
+            
+            if not post:
+                raise HTTPException(status_code=404, detail="Post not found")
+            
+            # Check if user is the creator
+            if post.user_id != current_user.id:
+                raise HTTPException(status_code=403, detail="You don't have permission to edit this post")
+            
+            # Update fields if provided
+            if post_data.title is not None:
+                post.title = post_data.title
+            if post_data.body is not None:
+                post.body = post_data.body
+            if post_data.tags is not None:
+                post.tags = json.dumps(post_data.tags)
+            if post_data.image is not None:
+                post.image = post_data.image
+            if post_data.postType is not None:
+                post.post_type = post_data.postType
+            if post_data.categoryId is not None:
+                # Validate category exists
+                category_id = None
+                if post_data.categoryId.startswith("cat_"):
+                    try:
+                        category_id = int(post_data.categoryId.replace("cat_", ""))
+                    except ValueError:
+                        raise HTTPException(status_code=400, detail="Invalid categoryId format")
+                else:
+                    try:
+                        category_id = int(post_data.categoryId)
+                    except ValueError:
+                        raise HTTPException(status_code=400, detail="Invalid categoryId format")
+                
+                category = session.query(Category).filter(Category.id == category_id).first()
+                if not category:
+                    raise HTTPException(status_code=404, detail="Category not found")
+                
+                post.category_id = category_id
+            
+            session.add(post)
+            session.commit()
+            session.refresh(post)
+            
+            # Get user and category info for response
+            user = session.query(User).filter(User.id == post.user_id).first()
+            category = session.query(Category).filter(Category.id == post.category_id).first()
+            
+            return {
+                "message": "Post updated successfully",
+                "id": f"post_{post.id}",
+                "title": post.title,
+                "body": post.body,
+                "image": post.image,
+                "tags": json.loads(post.tags) if post.tags else [],
+                "category": {
+                    "id": f"cat_{category.id:03d}",
+                    "name": category.name
+                },
+                "postType": post.post_type,
+                "user": {
+                    "id": f"user_{user.id}",
+                    "name": user.name
+                },
+                "postedTime": post.created_at.isoformat()
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating post: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error updating post: {str(e)}")
+
+
+@app.post("/community/create-categories")
+def create_category(data: CreateCategorySchema):
+    """
+    Create a new category for community posts.
+    Public endpoint (no authentication required).
+    """
+    try:
+        with Session(engine) as session:
+            # Check if category with same name already exists
+            existing = session.query(Category).filter(Category.name == data.name).first()
+            if existing:
+                raise HTTPException(status_code=400, detail="Category with this name already exists")
+            
+            # Create new category
+            new_category = Category(name=data.name)
+            session.add(new_category)
+            session.commit()
+            session.refresh(new_category)
+            
+            return {
+                "message": "Category created successfully",
+                "id": f"cat_{new_category.id:03d}",
+                "name": new_category.name
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating category: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error creating category: {str(e)}")
+
+
+@app.get("/community/category")
+def get_categories():
+    """
+    Get all categories for community posts.
+    Public endpoint (no authentication required).
+    """
+    try:
+        with Session(engine) as session:
+            categories = session.query(Category).order_by(Category.name).all()
+            
+            category_list = []
+            for category in categories:
+                category_list.append({
+                    "id": f"cat_{category.id:03d}",
+                    "name": category.name
+                })
+            
+            return category_list
+    except Exception as e:
+        logger.error(f"Error fetching categories: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error fetching categories: {str(e)}")
+
+
+@app.post("/community/upload-post-image")
+async def upload_community_post_image(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Upload images for community posts.
+    Returns the image URL to be used in the create-post API's image field.
+    Uses Supabase Storage in production, local storage in development.
+    """
+    try:
+        # Validate file type (images only)
+        if not file.content_type or not file.content_type.startswith('image/'):
+            raise HTTPException(status_code=400, detail="File must be an image")
+        
+        # Generate unique filename
+        file_extension = os.path.splitext(file.filename)[1] if file.filename else ".jpg"
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        unique_filename = f"{timestamp}_{current_user.id}{file_extension}"
+        
+        # Read file content
+        content = await file.read()
+        
+        # Determine storage path
+        storage_folder = "community-post-images"
+        storage_key = f"{storage_folder}/{unique_filename}"
+        
+        # Use Supabase Storage if configured, otherwise use local storage
+        if supabase_client and USE_SUPABASE_STORAGE:
+            # Upload to Supabase Storage
+            try:
+                # Upload file to Supabase Storage
+                response = supabase_client.storage.from_(SUPABASE_STORAGE_BUCKET).upload(
+                    path=storage_key,
+                    file=content,
+                    file_options={"content-type": file.content_type, "upsert": "true"}
+                )
+                
+                # Get public URL
+                public_url_response = supabase_client.storage.from_(SUPABASE_STORAGE_BUCKET).get_public_url(storage_key)
+                public_url = public_url_response
+                
+                logger.info(f"Community post image uploaded to Supabase Storage: {storage_key}")
+                
+                return {
+                    "url": public_url  # Return URL to use in create-post API
+                }
+            except Exception as e:
+                logger.error(f"Supabase Storage upload error: {str(e)}", exc_info=True)
+                raise HTTPException(status_code=503, detail=f"Error uploading to Supabase Storage: {str(e)}")
+        else:
+            # Local storage fallback (for development)
+            upload_dir = os.path.join("uploads", storage_folder)
+            os.makedirs(upload_dir, exist_ok=True)
+            
+            file_path = os.path.join(upload_dir, unique_filename)
+            
+            # Save file locally
+            with open(file_path, "wb") as buffer:
+                buffer.write(content)
+            
+            logger.info(f"Community post image saved locally: {file_path}")
+            
+            return {
+                "url": f"/uploads/{storage_key}"  # Relative URL for local files
+            }
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error uploading community post image: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error uploading image: {str(e)}")
+
+
+@app.post("/upload-group-image")
+async def upload_group_image(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Upload images for groups.
+    Returns the image URL to be used in the create-group API's image field.
+    Uses Supabase Storage in production, local storage in development.
+    """
+    try:
+        # Validate file type (images only)
+        if not file.content_type or not file.content_type.startswith('image/'):
+            raise HTTPException(status_code=400, detail="File must be an image")
+        
+        # Generate unique filename
+        file_extension = os.path.splitext(file.filename)[1] if file.filename else ".jpg"
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        unique_filename = f"{timestamp}_{current_user.id}{file_extension}"
+        
+        # Read file content
+        content = await file.read()
+        
+        # Determine storage path
+        storage_folder = "group-images"
+        storage_key = f"{storage_folder}/{unique_filename}"
+        
+        # Use Supabase Storage if configured, otherwise use local storage
+        if supabase_client and USE_SUPABASE_STORAGE:
+            # Upload to Supabase Storage
+            try:
+                # Upload file to Supabase Storage
+                response = supabase_client.storage.from_(SUPABASE_STORAGE_BUCKET).upload(
+                    path=storage_key,
+                    file=content,
+                    file_options={"content-type": file.content_type, "upsert": "true"}
+                )
+                
+                # Get public URL
+                public_url_response = supabase_client.storage.from_(SUPABASE_STORAGE_BUCKET).get_public_url(storage_key)
+                public_url = public_url_response
+                
+                logger.info(f"Group image uploaded to Supabase Storage: {storage_key}")
+                
+                return {
+                    "url": public_url  # Return URL to use in create-group API
+                }
+            except Exception as e:
+                logger.error(f"Supabase Storage upload error: {str(e)}", exc_info=True)
+                raise HTTPException(status_code=503, detail=f"Error uploading to Supabase Storage: {str(e)}")
+        else:
+            # Local storage fallback (for development)
+            upload_dir = os.path.join("uploads", storage_folder)
+            os.makedirs(upload_dir, exist_ok=True)
+            
+            file_path = os.path.join(upload_dir, unique_filename)
+            
+            # Save file locally
+            with open(file_path, "wb") as buffer:
+                buffer.write(content)
+            
+            logger.info(f"Group image saved locally: {file_path}")
+            
+            return {
+                "url": f"/uploads/{storage_key}"  # Relative URL for local files
+            }
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error uploading group image: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error uploading image: {str(e)}")
+
+
+# ==================== GROUP API ENDPOINTS ====================
+
+@app.post("/create-group")
+def create_group(data: CreateGroupSchema, current_user: User = Depends(get_current_user)):
+    """
+    Create a new group.
+    """
+    try:
+        with Session(engine) as session:
+            # Validate category exists
+            category_id = None
+            if data.categoryId.startswith("cat_"):
+                try:
+                    category_id = int(data.categoryId.replace("cat_", ""))
+                except ValueError:
+                    raise HTTPException(status_code=400, detail="Invalid categoryId format")
+            else:
+                try:
+                    category_id = int(data.categoryId)
+                except ValueError:
+                    raise HTTPException(status_code=400, detail="Invalid categoryId format")
+            
+            category = session.query(Category).filter(Category.id == category_id).first()
+            if not category:
+                raise HTTPException(status_code=404, detail="Category not found")
+            
+            # Create new group
+            new_group = Group(
+                group_name=data.groupName,
+                group_description=data.groupDescription,
+                image=data.image,
+                category_id=category_id,
+                created_by_id=current_user.id
+            )
+            
+            session.add(new_group)
+            session.commit()
+            session.refresh(new_group)
+            
+            return {
+                "message": "Group created successfully",
+                "groupId": f"group_{new_group.id}"
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating group: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error creating group: {str(e)}")
+
+
+@app.get("/view-group")
+def view_groups(current_user: User = Depends(get_current_user)):
+    """
+    Get all groups.
+    """
+    try:
+        with Session(engine) as session:
+            groups = session.query(Group).order_by(Group.created_at.desc()).all()
+            
+            group_list = []
+            for group in groups:
+                # Get creator info
+                creator = session.query(User).filter(User.id == group.created_by_id).first()
+                if not creator:
+                    continue
+                
+                # Get category info
+                category = session.query(Category).filter(Category.id == group.category_id).first()
+                if not category:
+                    continue
+                
+                group_list.append({
+                    "groupId": f"group_{group.id}",
+                    "groupName": group.group_name,
+                    "groupDescription": group.group_description,
+                    "image": group.image,
+                    "category": {
+                        "id": f"cat_{category.id:03d}",
+                        "name": category.name
+                    },
+                    "createdBy": {
+                        "id": f"user_{creator.id}",
+                        "name": creator.name
+                    },
+                    "createdAt": group.created_at.isoformat()
+                })
+            
+            return group_list
+    except Exception as e:
+        logger.error(f"Error fetching groups: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error fetching groups: {str(e)}")
+
+
+@app.patch("/update-group/{group_id}")
+def update_group(group_id: int, group_data: UpdateGroupSchema, current_user: User = Depends(get_current_user)):
+    """
+    Update an existing group.
+    Only the group creator can update their own group.
+    Use the numeric ID (e.g., 1, 2, 3) not "group_1" format.
+    """
+    try:
+        with Session(engine) as session:
+            group = session.query(Group).filter(Group.id == group_id).first()
+            
+            if not group:
+                raise HTTPException(status_code=404, detail="Group not found")
+            
+            # Check if user is the creator
+            if group.created_by_id != current_user.id:
+                raise HTTPException(status_code=403, detail="You don't have permission to edit this group")
+            
+            # Update fields if provided
+            if group_data.groupName is not None:
+                group.group_name = group_data.groupName
+            if group_data.groupDescription is not None:
+                group.group_description = group_data.groupDescription
+            if group_data.image is not None:
+                group.image = group_data.image
+            if group_data.categoryId is not None:
+                # Validate category exists
+                category_id = None
+                if group_data.categoryId.startswith("cat_"):
+                    try:
+                        category_id = int(group_data.categoryId.replace("cat_", ""))
+                    except ValueError:
+                        raise HTTPException(status_code=400, detail="Invalid categoryId format")
+                else:
+                    try:
+                        category_id = int(group_data.categoryId)
+                    except ValueError:
+                        raise HTTPException(status_code=400, detail="Invalid categoryId format")
+                
+                category = session.query(Category).filter(Category.id == category_id).first()
+                if not category:
+                    raise HTTPException(status_code=404, detail="Category not found")
+                
+                group.category_id = category_id
+            
+            session.add(group)
+            session.commit()
+            session.refresh(group)
+            
+            # Get creator and category info for response
+            creator = session.query(User).filter(User.id == group.created_by_id).first()
+            category = session.query(Category).filter(Category.id == group.category_id).first()
+            
+            return {
+                "message": "Group updated successfully",
+                "groupId": f"group_{group.id}",
+                "groupName": group.group_name,
+                "groupDescription": group.group_description,
+                "image": group.image,
+                "category": {
+                    "id": f"cat_{category.id:03d}",
+                    "name": category.name
+                },
+                "createdBy": {
+                    "id": f"user_{creator.id}",
+                    "name": creator.name
+                },
+                "createdAt": group.created_at.isoformat()
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating group: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error updating group: {str(e)}")
+
+
+@app.delete("/delete-group/{group_id}")
+def delete_group(group_id: int, current_user: User = Depends(get_current_user)):
+    """
+    Delete a group.
+    Only the group creator can delete their own group.
+    Use the numeric ID (e.g., 1, 2, 3) not "group_1" format.
+    """
+    try:
+        with Session(engine) as session:
+            group = session.query(Group).filter(Group.id == group_id).first()
+            
+            if not group:
+                raise HTTPException(status_code=404, detail="Group not found")
+            
+            # Check if user is the creator
+            if group.created_by_id != current_user.id:
+                raise HTTPException(status_code=403, detail="You don't have permission to delete this group")
+            
+            session.delete(group)
+            session.commit()
+            
+            return {
+                "message": "Group deleted successfully",
+                "groupId": f"group_{group_id}"
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting group: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error deleting group: {str(e)}")
+
+
+# ==================== GROUP POST API ENDPOINTS ====================
+
+@app.post("/group/upload-post-image")
+async def upload_group_post_image(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Upload images for group posts.
+    Returns the image URL to be used in the group/create-post API's image field.
+    Uses Supabase Storage in production, local storage in development.
+    """
+    try:
+        # Validate file type (images only)
+        if not file.content_type or not file.content_type.startswith('image/'):
+            raise HTTPException(status_code=400, detail="File must be an image")
+        
+        # Generate unique filename
+        file_extension = os.path.splitext(file.filename)[1] if file.filename else ".jpg"
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        unique_filename = f"{timestamp}_{current_user.id}{file_extension}"
+        
+        # Read file content
+        content = await file.read()
+        
+        # Determine storage path
+        storage_folder = "group-post-images"
+        storage_key = f"{storage_folder}/{unique_filename}"
+        
+        # Use Supabase Storage if configured, otherwise use local storage
+        if supabase_client and USE_SUPABASE_STORAGE:
+            # Upload to Supabase Storage
+            try:
+                # Upload file to Supabase Storage
+                response = supabase_client.storage.from_(SUPABASE_STORAGE_BUCKET).upload(
+                    path=storage_key,
+                    file=content,
+                    file_options={"content-type": file.content_type, "upsert": "true"}
+                )
+                
+                # Get public URL
+                public_url_response = supabase_client.storage.from_(SUPABASE_STORAGE_BUCKET).get_public_url(storage_key)
+                public_url = public_url_response
+                
+                logger.info(f"Group post image uploaded to Supabase Storage: {storage_key}")
+                
+                return {
+                    "url": public_url  # Return URL to use in group/create-post API
+                }
+            except Exception as e:
+                logger.error(f"Supabase Storage upload error: {str(e)}", exc_info=True)
+                raise HTTPException(status_code=503, detail=f"Error uploading to Supabase Storage: {str(e)}")
+        else:
+            # Local storage fallback (for development)
+            upload_dir = os.path.join("uploads", storage_folder)
+            os.makedirs(upload_dir, exist_ok=True)
+            
+            file_path = os.path.join(upload_dir, unique_filename)
+            
+            # Save file locally
+            with open(file_path, "wb") as buffer:
+                buffer.write(content)
+            
+            logger.info(f"Group post image saved locally: {file_path}")
+            
+            return {
+                "url": f"/uploads/{storage_key}"  # Relative URL for local files
+            }
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error uploading group post image: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error uploading image: {str(e)}")
+
+
+@app.post("/group/create-post")
+def create_group_post(data: CreateGroupPostSchema, current_user: User = Depends(get_current_user)):
+    """
+    Create a new post within a group.
+    """
+    try:
+        with Session(engine) as session:
+            # Validate group exists
+            group_id = None
+            if data.groupId.startswith("group_"):
+                try:
+                    group_id = int(data.groupId.replace("group_", ""))
+                except ValueError:
+                    raise HTTPException(status_code=400, detail="Invalid groupId format")
+            else:
+                try:
+                    group_id = int(data.groupId)
+                except ValueError:
+                    raise HTTPException(status_code=400, detail="Invalid groupId format")
+            
+            group = session.query(Group).filter(Group.id == group_id).first()
+            if not group:
+                raise HTTPException(status_code=404, detail="Group not found")
+            
+            # Validate category exists
+            category_id = None
+            if data.categoryId.startswith("cat_"):
+                try:
+                    category_id = int(data.categoryId.replace("cat_", ""))
+                except ValueError:
+                    raise HTTPException(status_code=400, detail="Invalid categoryId format")
+            else:
+                try:
+                    category_id = int(data.categoryId)
+                except ValueError:
+                    raise HTTPException(status_code=400, detail="Invalid categoryId format")
+            
+            category = session.query(Category).filter(Category.id == category_id).first()
+            if not category:
+                raise HTTPException(status_code=404, detail="Category not found")
+            
+            # Create new group post
+            new_post = GroupPost(
+                post_title=data.postTitle,
+                post_body=data.postBody,
+                image=data.image,
+                tags=json.dumps(data.tags),
+                category_id=category_id,
+                post_type=data.postType,
+                group_id=group_id,
+                user_id=current_user.id
+            )
+            
+            session.add(new_post)
+            session.commit()
+            session.refresh(new_post)
+            
+            return {
+                "message": "Group post created successfully",
+                "id": f"post_{new_post.id}"
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating group post: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error creating group post: {str(e)}")
+
+
+@app.get("/group/view-post")
+def view_group_posts(current_user: User = Depends(get_current_user)):
+    """
+    Get all group posts.
+    """
+    try:
+        with Session(engine) as session:
+            posts = session.query(GroupPost).order_by(GroupPost.created_at.desc()).all()
+            
+            post_list = []
+            for post in posts:
+                # Get user info
+                user = session.query(User).filter(User.id == post.user_id).first()
+                if not user:
+                    continue
+                
+                # Get category info
+                category = session.query(Category).filter(Category.id == post.category_id).first()
+                if not category:
+                    continue
+                
+                post_list.append({
+                    "id": f"post_{post.id}",
+                    "groupId": f"group_{post.group_id}",
+                    "postTitle": post.post_title,
+                    "postBody": post.post_body,
+                    "image": post.image,
+                    "tags": json.loads(post.tags) if post.tags else [],
+                    "postType": post.post_type,
+                    "category": {
+                        "id": f"cat_{category.id:03d}",
+                        "name": category.name
+                    },
+                    "user": {
+                        "id": f"user_{user.id}",
+                        "name": user.name
+                    },
+                    "postedTime": post.created_at.isoformat()
+                })
+            
+            return post_list
+    except Exception as e:
+        logger.error(f"Error fetching group posts: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error fetching group posts: {str(e)}")
+
+
+@app.patch("/group/update-post/{post_id}")
+def update_group_post(post_id: int, post_data: UpdateGroupPostSchema, current_user: User = Depends(get_current_user)):
+    """
+    Update an existing group post.
+    Only the post creator can update their own post.
+    Use the numeric ID (e.g., 1, 2, 3) not "post_1" format.
+    """
+    try:
+        with Session(engine) as session:
+            post = session.query(GroupPost).filter(GroupPost.id == post_id).first()
+            
+            if not post:
+                raise HTTPException(status_code=404, detail="Group post not found")
+            
+            # Check if user is the creator
+            if post.user_id != current_user.id:
+                raise HTTPException(status_code=403, detail="You don't have permission to edit this post")
+            
+            # Update fields if provided
+            if post_data.postTitle is not None:
+                post.post_title = post_data.postTitle
+            if post_data.postBody is not None:
+                post.post_body = post_data.postBody
+            if post_data.tags is not None:
+                post.tags = json.dumps(post_data.tags)
+            if post_data.image is not None:
+                post.image = post_data.image
+            if post_data.postType is not None:
+                post.post_type = post_data.postType
+            if post_data.categoryId is not None:
+                # Validate category exists
+                category_id = None
+                if post_data.categoryId.startswith("cat_"):
+                    try:
+                        category_id = int(post_data.categoryId.replace("cat_", ""))
+                    except ValueError:
+                        raise HTTPException(status_code=400, detail="Invalid categoryId format")
+                else:
+                    try:
+                        category_id = int(post_data.categoryId)
+                    except ValueError:
+                        raise HTTPException(status_code=400, detail="Invalid categoryId format")
+                
+                category = session.query(Category).filter(Category.id == category_id).first()
+                if not category:
+                    raise HTTPException(status_code=404, detail="Category not found")
+                
+                post.category_id = category_id
+            
+            session.add(post)
+            session.commit()
+            session.refresh(post)
+            
+            # Get user and category info for response
+            user = session.query(User).filter(User.id == post.user_id).first()
+            category = session.query(Category).filter(Category.id == post.category_id).first()
+            
+            return {
+                "message": "Group post updated successfully",
+                "id": f"post_{post.id}",
+                "groupId": f"group_{post.group_id}",
+                "postTitle": post.post_title,
+                "postBody": post.post_body,
+                "image": post.image,
+                "tags": json.loads(post.tags) if post.tags else [],
+                "postType": post.post_type,
+                "category": {
+                    "id": f"cat_{category.id:03d}",
+                    "name": category.name
+                },
+                "user": {
+                    "id": f"user_{user.id}",
+                    "name": user.name
+                },
+                "postedTime": post.created_at.isoformat()
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating group post: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error updating group post: {str(e)}")
+
+
+@app.delete("/group/delete-post/{post_id}")
+def delete_group_post(post_id: int, current_user: User = Depends(get_current_user)):
+    """
+    Delete a group post.
+    Only the post creator can delete their own post.
+    Use the numeric ID (e.g., 1, 2, 3) not "post_1" format.
+    """
+    try:
+        with Session(engine) as session:
+            post = session.query(GroupPost).filter(GroupPost.id == post_id).first()
+            
+            if not post:
+                raise HTTPException(status_code=404, detail="Group post not found")
+            
+            # Check if user is the creator
+            if post.user_id != current_user.id:
+                raise HTTPException(status_code=403, detail="You don't have permission to delete this post")
+            
+            session.delete(post)
+            session.commit()
+            
+            return {
+                "message": "Group post deleted successfully",
+                "id": f"post_{post_id}"
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting group post: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error deleting group post: {str(e)}")

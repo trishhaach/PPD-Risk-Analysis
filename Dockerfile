@@ -19,8 +19,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
-# Create uploads directory for file storage
-RUN mkdir -p uploads/blog-images
+# Create uploads directories for file storage
+RUN mkdir -p uploads/blog-images \
+    uploads/community-post-images \
+    uploads/group-images \
+    uploads/group-post-images
 
 # Expose port 8000
 EXPOSE 8000

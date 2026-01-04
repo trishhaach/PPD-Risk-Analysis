@@ -52,3 +52,48 @@ class Blog(SQLModel, table=True):
     created_by_id: int = Field(foreign_key="user.id", nullable=False)
     created_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
     updated_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime))
+
+
+class Category(SQLModel, table=True):
+    """Model to store community post categories"""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(sa_column=Column(String(100), unique=True, nullable=False))
+    created_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
+
+
+class CommunityPost(SQLModel, table=True):
+    """Model to store community posts/feeds"""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    title: str = Field(sa_column=Column(String(200), nullable=False))
+    body: str = Field(sa_column=Column(Text, nullable=False))
+    image: Optional[str] = Field(default=None, sa_column=Column(String(500)))  # Image URL
+    tags: str = Field(sa_column=Column(Text, nullable=False))  # JSON array as string ["tag1", "tag2"]
+    category_id: int = Field(foreign_key="category.id", nullable=False)
+    post_type: bool = Field(default=True, sa_column=Column(Boolean, nullable=False))  # True for public, False for private
+    user_id: int = Field(foreign_key="user.id", nullable=False)
+    created_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
+
+
+class Group(SQLModel, table=True):
+    """Model to store community groups"""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    group_name: str = Field(sa_column=Column(String(200), nullable=False))
+    group_description: str = Field(sa_column=Column(Text, nullable=False))
+    image: Optional[str] = Field(default=None, sa_column=Column(String(500)))  # Image URL
+    category_id: int = Field(foreign_key="category.id", nullable=False)
+    created_by_id: int = Field(foreign_key="user.id", nullable=False)
+    created_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
+
+
+class GroupPost(SQLModel, table=True):
+    """Model to store posts within groups"""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    post_title: str = Field(sa_column=Column(String(200), nullable=False))
+    post_body: str = Field(sa_column=Column(Text, nullable=False))
+    image: Optional[str] = Field(default=None, sa_column=Column(String(500)))  # Image URL
+    tags: str = Field(sa_column=Column(Text, nullable=False))  # JSON array as string ["tag1", "tag2"]
+    category_id: int = Field(foreign_key="category.id", nullable=False)
+    post_type: bool = Field(default=True, sa_column=Column(Boolean, nullable=False))  # True for public, False for private
+    group_id: int = Field(foreign_key="group.id", nullable=False)
+    user_id: int = Field(foreign_key="user.id", nullable=False)
+    created_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
