@@ -1588,6 +1588,38 @@ def update_post(post_id: int, post_data: UpdatePostSchema, current_user: User = 
         raise HTTPException(status_code=503, detail=f"Error updating post: {str(e)}")
 
 
+@app.delete("/community/delete-post/{post_id}")
+def delete_community_post(post_id: int, current_user: User = Depends(get_current_user)):
+    """
+    Delete a community post.
+    Only the post creator can delete their own post.
+    Use the numeric ID (e.g., 1, 2, 3) not "post_1" format.
+    """
+    try:
+        with Session(engine) as session:
+            post = session.query(CommunityPost).filter(CommunityPost.id == post_id).first()
+            
+            if not post:
+                raise HTTPException(status_code=404, detail="Community post not found")
+            
+            # Check if user is the creator
+            if post.user_id != current_user.id:
+                raise HTTPException(status_code=403, detail="You don't have permission to delete this post")
+            
+            session.delete(post)
+            session.commit()
+            
+            return {
+                "message": "Community post deleted successfully",
+                "id": f"post_{post_id}"
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting community post: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error deleting community post: {str(e)}")
+
+
 @app.post("/community/create-categories")
 def create_category(data: CreateCategorySchema):
     """
