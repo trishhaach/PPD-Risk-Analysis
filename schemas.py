@@ -7,6 +7,7 @@ class SignupSchema(BaseModel):
     email: EmailStr
     password: str
     confirmPassword: str
+    role: str = Field(default="mother", description="User role: mother or contributor")
 
     @field_validator("confirmPassword")
     def passwords_match(cls, v, info):
@@ -190,7 +191,7 @@ class CreatePostSchema(BaseModel):
     body: str
     tags: List[str]
     categoryId: str
-    postType: bool
+    isAnonymous: bool
     image: Optional[str] = None
 
 
@@ -202,6 +203,7 @@ class CategoryResponseSchema(BaseModel):
 class UserResponseSchema(BaseModel):
     id: str
     name: str
+    role: Optional[str] = None
 
 
 class ViewPostResponseSchema(BaseModel):
@@ -211,7 +213,7 @@ class ViewPostResponseSchema(BaseModel):
     image: Optional[str]
     tags: List[str]
     category: CategoryResponseSchema
-    postType: bool
+    isAnonymous: bool
     user: UserResponseSchema
     postedTime: str
 
@@ -225,7 +227,7 @@ class UpdatePostSchema(BaseModel):
     body: Optional[str] = None
     tags: Optional[List[str]] = None
     categoryId: Optional[str] = None
-    postType: Optional[bool] = None
+    isAnonymous: Optional[bool] = None
     image: Optional[str] = None
 
 
@@ -260,7 +262,7 @@ class CreateGroupPostSchema(BaseModel):
     postBody: str
     tags: List[str]
     categoryId: str
-    postType: bool
+    isAnonymous: bool
     image: Optional[str] = None
     groupId: str
 
@@ -270,7 +272,7 @@ class UpdateGroupPostSchema(BaseModel):
     postBody: Optional[str] = None
     tags: Optional[List[str]] = None
     categoryId: Optional[str] = None
-    postType: Optional[bool] = None
+    isAnonymous: Optional[bool] = None
     image: Optional[str] = None
 
 
@@ -281,7 +283,7 @@ class ViewGroupPostResponseSchema(BaseModel):
     postBody: str
     image: Optional[str]
     tags: List[str]
-    postType: bool
+    isAnonymous: bool
     category: CategoryResponseSchema
     user: UserResponseSchema
     postedTime: str

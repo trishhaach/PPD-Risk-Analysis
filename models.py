@@ -8,6 +8,7 @@ class User(SQLModel, table=True):
     name: str = Field(sa_column=Column(String(50), nullable=False))
     email: str = Field(sa_column=Column(String(100), unique=True, nullable=False))
     password: str = Field(sa_column=Column(String(255), nullable=False))
+    role: str = Field(sa_column=Column(String(20), nullable=False, default="mother"))
 
 
 class EPDSResult(SQLModel, table=True):

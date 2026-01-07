@@ -307,6 +307,7 @@ def signup(data: SignupSchema, background_tasks: BackgroundTasks):
                 name=data.name,
                 email=data.email,
                 password=hashed_password,
+                role=data.role
             )
 
             session.add(new_user)
@@ -328,7 +329,8 @@ def signup(data: SignupSchema, background_tasks: BackgroundTasks):
                 "user": {
                     "id": new_user.id,
                     "email": new_user.email,
-                    "name": new_user.name
+                    "name": new_user.name,
+                    "role": new_user.role
                 }
             }
             
@@ -362,12 +364,14 @@ def login(data: LoginSchema):
                 "message": "Login successful!",
                 "email": user.email,
                 "name": user.name,
+                "role": user.role,
                 "access_token": access_token,
                 "token_type": "bearer",
                 "user": {
                     "id": user.id,
                     "email": user.email,
-                    "name": user.name
+                    "name": user.name,
+                    "role": user.role
                 }
             }
             
@@ -472,6 +476,7 @@ def read_profile(current_user: User = Depends(get_current_user)):
     return {
         "email": current_user.email,
         "name": current_user.name,
+        "role": current_user.role,
     }
 
 
@@ -1165,7 +1170,7 @@ def create_post(data: CreatePostSchema, current_user: User = Depends(get_current
                 image=data.image,
                 tags=json.dumps(data.tags),
                 category_id=category_id,
-                post_type=data.postType,
+                post_type=data.isAnonymous,
                 user_id=current_user.id
             )
             
@@ -1215,7 +1220,7 @@ def view_posts(current_user: User = Depends(get_current_user)):
                         "id": f"cat_{category.id:03d}",
                         "name": category.name
                     },
-                    "postType": post.post_type,
+                    "isAnonymous": post.post_type,
                     "user": {
                         "id": f"user_{user.id}",
                         "name": user.name
@@ -1257,8 +1262,8 @@ def update_post(post_id: int, post_data: UpdatePostSchema, current_user: User = 
                 post.tags = json.dumps(post_data.tags)
             if post_data.image is not None:
                 post.image = post_data.image
-            if post_data.postType is not None:
-                post.post_type = post_data.postType
+            if post_data.isAnonymous is not None:
+                post.post_type = post_data.isAnonymous
             if post_data.categoryId is not None:
                 # Validate category exists
                 category_id = None
@@ -1298,7 +1303,7 @@ def update_post(post_id: int, post_data: UpdatePostSchema, current_user: User = 
                     "id": f"cat_{category.id:03d}",
                     "name": category.name
                 },
-                "postType": post.post_type,
+                "isAnonymous": post.post_type,
                 "user": {
                     "id": f"user_{user.id}",
                     "name": user.name
@@ -1839,7 +1844,7 @@ def create_group_post(data: CreateGroupPostSchema, current_user: User = Depends(
                 image=data.image,
                 tags=json.dumps(data.tags),
                 category_id=category_id,
-                post_type=data.postType,
+                post_type=data.isAnonymous,
                 group_id=group_id,
                 user_id=current_user.id
             )
@@ -1887,7 +1892,7 @@ def view_group_posts(current_user: User = Depends(get_current_user)):
                     "postBody": post.post_body,
                     "image": post.image,
                     "tags": json.loads(post.tags) if post.tags else [],
-                    "postType": post.post_type,
+                    "isAnonymous": post.post_type,
                     "category": {
                         "id": f"cat_{category.id:03d}",
                         "name": category.name
@@ -1932,8 +1937,8 @@ def update_group_post(post_id: int, post_data: UpdateGroupPostSchema, current_us
                 post.tags = json.dumps(post_data.tags)
             if post_data.image is not None:
                 post.image = post_data.image
-            if post_data.postType is not None:
-                post.post_type = post_data.postType
+            if post_data.isAnonymous is not None:
+                post.post_type = post_data.isAnonymous
             if post_data.categoryId is not None:
                 # Validate category exists
                 category_id = None
@@ -1970,7 +1975,7 @@ def update_group_post(post_id: int, post_data: UpdateGroupPostSchema, current_us
                 "postBody": post.post_body,
                 "image": post.image,
                 "tags": json.loads(post.tags) if post.tags else [],
-                "postType": post.post_type,
+                "isAnonymous": post.post_type,
                 "category": {
                     "id": f"cat_{category.id:03d}",
                     "name": category.name
