@@ -288,3 +288,52 @@ class ViewGroupPostResponseSchema(BaseModel):
     user: UserResponseSchema
     postedTime: str
 
+
+# ==================== COMMENT SCHEMAS ====================
+
+
+class CreateCommentSchema(BaseModel):
+    postId: str  # e.g. "post_1" or "1"
+    text: str
+    parentCommentId: Optional[str] = Field(
+        default=None,
+        description="Optional. Set to comment ID (e.g. 'comment_5') to create a reply"
+    )
+
+
+class ViewCommentUserSchema(BaseModel):
+    id: str
+    name: str
+    role: Optional[str] = None
+
+
+class ViewCommentSchema(BaseModel):
+    id: str
+    postId: str
+    parentCommentId: Optional[str]
+    text: str
+    user: ViewCommentUserSchema
+    likeCount: int
+    hasLiked: bool
+    createdAt: str
+
+
+class CreateGroupCommentSchema(BaseModel):
+    postId: str  # e.g. "post_1" or "1"
+    text: str
+    parentCommentId: Optional[str] = Field(
+        default=None,
+        description="Optional. Set to comment ID (e.g. 'comment_5') to create a reply"
+    )
+
+
+class ViewGroupCommentSchema(BaseModel):
+    id: str
+    postId: str
+    parentCommentId: Optional[str]
+    text: str
+    user: ViewCommentUserSchema
+    likeCount: int
+    hasLiked: bool
+    createdAt: str
+

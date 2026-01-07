@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 import hashlib
 import logging
 import os
-from typing import Optional
+from typing import Optional, List
 
 from dotenv import load_dotenv
 import smtplib
@@ -46,14 +46,50 @@ from jose import JWTError, jwt
 from sqlmodel import Session
 
 from database import init_db, engine
-from models import User, EPDSResult, Blog, Category, CommunityPost, Group, GroupPost
+from models import (
+    User,
+    EPDSResult,
+    Blog,
+    Category,
+    CommunityPost,
+    Group,
+    GroupPost,
+    CommunityPostLike,
+    GroupPostLike,
+    CommunityComment,
+    GroupComment,
+    CommunityCommentLike,
+    GroupCommentLike,
+)
 from schemas import (
-    SignupSchema, LoginSchema, ChangePasswordSchema, ForgotPasswordSchema, 
-    ResetPasswordSchema, UpdateNameSchema, EPDSAnswerSchema,
-    BlogCreateSchema, BlogUpdateSchema, BlogListItemSchema, BlogDetailSchema, CreatedBySchema,
-    CreatePostSchema, CategoryResponseSchema, UserResponseSchema, ViewPostResponseSchema,
-    CreateCategorySchema, UpdatePostSchema, CreateGroupSchema, UpdateGroupSchema, ViewGroupResponseSchema,
-    CreateGroupPostSchema, UpdateGroupPostSchema, ViewGroupPostResponseSchema
+    SignupSchema,
+    LoginSchema,
+    ChangePasswordSchema,
+    ForgotPasswordSchema,
+    ResetPasswordSchema,
+    UpdateNameSchema,
+    EPDSAnswerSchema,
+    BlogCreateSchema,
+    BlogUpdateSchema,
+    BlogListItemSchema,
+    BlogDetailSchema,
+    CreatedBySchema,
+    CreatePostSchema,
+    CategoryResponseSchema,
+    UserResponseSchema,
+    ViewPostResponseSchema,
+    CreateCategorySchema,
+    UpdatePostSchema,
+    CreateGroupSchema,
+    UpdateGroupSchema,
+    ViewGroupResponseSchema,
+    CreateGroupPostSchema,
+    UpdateGroupPostSchema,
+    ViewGroupPostResponseSchema,
+    CreateCommentSchema,
+    ViewCommentSchema,
+    CreateGroupCommentSchema,
+    ViewGroupCommentSchema,
 )
 
 # Logging is already set up above (before Supabase import)
@@ -1209,6 +1245,13 @@ def view_posts(current_user: User = Depends(get_current_user)):
                 category = session.query(Category).filter(Category.id == post.category_id).first()
                 if not category:
                     continue
+
+                # Likes info
+                like_count = session.query(CommunityPostLike).filter(CommunityPostLike.post_id == post.id).count()
+                has_liked = session.query(CommunityPostLike).filter(
+                    CommunityPostLike.post_id == post.id,
+                    CommunityPostLike.user_id == current_user.id
+                ).first() is not None
                 
                 post_list.append({
                     "id": f"post_{post.id}",
@@ -1221,6 +1264,8 @@ def view_posts(current_user: User = Depends(get_current_user)):
                         "name": category.name
                     },
                     "isAnonymous": post.post_type,
+                    "likeCount": like_count,
+                    "hasLiked": has_liked,
                     "user": {
                         "id": f"user_{user.id}",
                         "name": user.name
@@ -1232,6 +1277,232 @@ def view_posts(current_user: User = Depends(get_current_user)):
     except Exception as e:
         logger.error(f"Error fetching posts: {str(e)}", exc_info=True)
         raise HTTPException(status_code=503, detail=f"Error fetching posts: {str(e)}")
+
+
+@app.post("/community/toggle-like/{post_id}")
+def toggle_community_post_like(post_id: int, current_user: User = Depends(get_current_user)):
+    """
+    Like/unlike a community post.
+    If the user has already liked the post, this will unlike it.
+    Returns current likeCount and hasLiked.
+    """
+    try:
+        with Session(engine) as session:
+            post = session.query(CommunityPost).filter(CommunityPost.id == post_id).first()
+            if not post:
+                raise HTTPException(status_code=404, detail="Post not found")
+
+            existing_like = session.query(CommunityPostLike).filter(
+                CommunityPostLike.post_id == post_id,
+                CommunityPostLike.user_id == current_user.id
+            ).first()
+
+            if existing_like:
+                # Unlike
+                session.delete(existing_like)
+                has_liked = False
+            else:
+                # Like
+                new_like = CommunityPostLike(
+                    post_id=post_id,
+                    user_id=current_user.id
+                )
+                session.add(new_like)
+                has_liked = True
+
+            session.commit()
+
+            like_count = session.query(CommunityPostLike).filter(CommunityPostLike.post_id == post_id).count()
+
+            return {
+                "id": f"post_{post.id}",
+                "likeCount": like_count,
+                "hasLiked": has_liked
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error toggling like on community post: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error toggling like: {str(e)}")
+
+
+@app.post("/community/comments")
+def create_community_comment(data: CreateCommentSchema, current_user: User = Depends(get_current_user)):
+    """
+    Create a comment or reply on a community post.
+    """
+    try:
+        with Session(engine) as session:
+            # Parse post ID (e.g. "post_1" or "1")
+            try:
+                if isinstance(data.postId, str) and data.postId.startswith("post_"):
+                    post_id = int(data.postId.replace("post_", ""))
+                else:
+                    post_id = int(data.postId)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid postId format")
+
+            post = session.query(CommunityPost).filter(CommunityPost.id == post_id).first()
+            if not post:
+                raise HTTPException(status_code=404, detail="Post not found")
+
+            # Parent comment (for replies)
+            parent_comment_id: Optional[int] = None
+            if data.parentCommentId:
+                try:
+                    if data.parentCommentId.startswith("comment_"):
+                        parent_comment_id = int(data.parentCommentId.replace("comment_", ""))
+                    else:
+                        parent_comment_id = int(data.parentCommentId)
+                except ValueError:
+                    raise HTTPException(status_code=400, detail="Invalid parentCommentId format")
+
+                parent = session.query(CommunityComment).filter(CommunityComment.id == parent_comment_id).first()
+                if not parent:
+                    raise HTTPException(status_code=404, detail="Parent comment not found")
+
+            comment = CommunityComment(
+                post_id=post_id,
+                user_id=current_user.id,
+                text=data.text,
+                parent_comment_id=parent_comment_id,
+            )
+
+            session.add(comment)
+            session.commit()
+            session.refresh(comment)
+
+            return {
+                "message": "Comment created successfully",
+                "id": f"comment_{comment.id}",
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating community comment: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error creating comment: {str(e)}")
+
+
+@app.get("/community/comments/{post_id}", response_model=List[ViewCommentSchema])
+def get_community_comments(post_id: str, current_user: User = Depends(get_current_user)):
+    """
+    Get comments (and replies) for a community post.
+    """
+    try:
+        with Session(engine) as session:
+            # Parse post ID
+            try:
+                if post_id.startswith("post_"):
+                    numeric_post_id = int(post_id.replace("post_", ""))
+                else:
+                    numeric_post_id = int(post_id)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid postId format")
+
+            post = session.query(CommunityPost).filter(CommunityPost.id == numeric_post_id).first()
+            if not post:
+                raise HTTPException(status_code=404, detail="Post not found")
+
+            comments = (
+                session.query(CommunityComment)
+                .filter(CommunityComment.post_id == numeric_post_id)
+                .order_by(CommunityComment.created_at.asc())
+                .all()
+            )
+
+            results: List[ViewCommentSchema] = []
+            for c in comments:
+                user = session.query(User).filter(User.id == c.user_id).first()
+                if not user:
+                    continue
+
+                like_count = (
+                    session.query(CommunityCommentLike)
+                    .filter(CommunityCommentLike.comment_id == c.id)
+                    .count()
+                )
+                has_liked = (
+                    session.query(CommunityCommentLike)
+                    .filter(
+                        CommunityCommentLike.comment_id == c.id,
+                        CommunityCommentLike.user_id == current_user.id,
+                    )
+                    .first()
+                    is not None
+                )
+
+                results.append(
+                    ViewCommentSchema(
+                        id=f"comment_{c.id}",
+                        postId=f"post_{c.post_id}",
+                        parentCommentId=f"comment_{c.parent_comment_id}"
+                        if c.parent_comment_id is not None
+                        else None,
+                        text=c.text,
+                        user={
+                            "id": f"user_{user.id}",
+                            "name": user.name,
+                            "role": user.role,
+                        },
+                        likeCount=like_count,
+                        hasLiked=has_liked,
+                        createdAt=c.created_at.isoformat(),
+                    )
+                )
+
+            return results
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching community comments: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error fetching comments: {str(e)}")
+
+
+@app.post("/community/comments/{comment_id}/toggle-like")
+def toggle_community_comment_like(comment_id: int, current_user: User = Depends(get_current_user)):
+    """
+    Like/unlike a community comment (or reply).
+    """
+    try:
+        with Session(engine) as session:
+            comment = session.query(CommunityComment).filter(CommunityComment.id == comment_id).first()
+            if not comment:
+                raise HTTPException(status_code=404, detail="Comment not found")
+
+            existing = session.query(CommunityCommentLike).filter(
+                CommunityCommentLike.comment_id == comment_id,
+                CommunityCommentLike.user_id == current_user.id,
+            ).first()
+
+            if existing:
+                session.delete(existing)
+                has_liked = False
+            else:
+                new_like = CommunityCommentLike(
+                    comment_id=comment_id,
+                    user_id=current_user.id,
+                )
+                session.add(new_like)
+                has_liked = True
+
+            session.commit()
+
+            like_count = (
+                session.query(CommunityCommentLike)
+                .filter(CommunityCommentLike.comment_id == comment_id)
+                .count()
+            )
+
+            return {
+                "id": f"comment_{comment.id}",
+                "likeCount": like_count,
+                "hasLiked": has_liked,
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error toggling like on community comment: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error toggling like: {str(e)}")
 
 
 @app.patch("/community/update-post/{post_id}")
@@ -1884,6 +2155,13 @@ def view_group_posts(current_user: User = Depends(get_current_user)):
                 category = session.query(Category).filter(Category.id == post.category_id).first()
                 if not category:
                     continue
+
+                # Likes info
+                like_count = session.query(GroupPostLike).filter(GroupPostLike.post_id == post.id).count()
+                has_liked = session.query(GroupPostLike).filter(
+                    GroupPostLike.post_id == post.id,
+                    GroupPostLike.user_id == current_user.id
+                ).first() is not None
                 
                 post_list.append({
                     "id": f"post_{post.id}",
@@ -1893,6 +2171,8 @@ def view_group_posts(current_user: User = Depends(get_current_user)):
                     "image": post.image,
                     "tags": json.loads(post.tags) if post.tags else [],
                     "isAnonymous": post.post_type,
+                    "likeCount": like_count,
+                    "hasLiked": has_liked,
                     "category": {
                         "id": f"cat_{category.id:03d}",
                         "name": category.name
@@ -2023,3 +2303,229 @@ def delete_group_post(post_id: int, current_user: User = Depends(get_current_use
     except Exception as e:
         logger.error(f"Error deleting group post: {str(e)}", exc_info=True)
         raise HTTPException(status_code=503, detail=f"Error deleting group post: {str(e)}")
+
+
+@app.post("/group/toggle-like/{post_id}")
+def toggle_group_post_like(post_id: int, current_user: User = Depends(get_current_user)):
+    """
+    Like/unlike a group post.
+    If the user has already liked the post, this will unlike it.
+    Returns current likeCount and hasLiked.
+    """
+    try:
+        with Session(engine) as session:
+            post = session.query(GroupPost).filter(GroupPost.id == post_id).first()
+            if not post:
+                raise HTTPException(status_code=404, detail="Group post not found")
+
+            existing_like = session.query(GroupPostLike).filter(
+                GroupPostLike.post_id == post_id,
+                GroupPostLike.user_id == current_user.id
+            ).first()
+
+            if existing_like:
+                # Unlike
+                session.delete(existing_like)
+                has_liked = False
+            else:
+                # Like
+                new_like = GroupPostLike(
+                    post_id=post_id,
+                    user_id=current_user.id
+                )
+                session.add(new_like)
+                has_liked = True
+
+            session.commit()
+
+            like_count = session.query(GroupPostLike).filter(GroupPostLike.post_id == post_id).count()
+
+            return {
+                "id": f"post_{post.id}",
+                "likeCount": like_count,
+                "hasLiked": has_liked
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error toggling like on group post: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error toggling like: {str(e)}")
+
+
+@app.post("/group/comments")
+def create_group_comment(data: CreateGroupCommentSchema, current_user: User = Depends(get_current_user)):
+    """
+    Create a comment or reply on a group post.
+    """
+    try:
+        with Session(engine) as session:
+            # Parse post ID
+            try:
+                if isinstance(data.postId, str) and data.postId.startswith("post_"):
+                    post_id = int(data.postId.replace("post_", ""))
+                else:
+                    post_id = int(data.postId)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid postId format")
+
+            post = session.query(GroupPost).filter(GroupPost.id == post_id).first()
+            if not post:
+                raise HTTPException(status_code=404, detail="Group post not found")
+
+            # Parent comment (for replies)
+            parent_comment_id: Optional[int] = None
+            if data.parentCommentId:
+                try:
+                    if data.parentCommentId.startswith("comment_"):
+                        parent_comment_id = int(data.parentCommentId.replace("comment_", ""))
+                    else:
+                        parent_comment_id = int(data.parentCommentId)
+                except ValueError:
+                    raise HTTPException(status_code=400, detail="Invalid parentCommentId format")
+
+                parent = session.query(GroupComment).filter(GroupComment.id == parent_comment_id).first()
+                if not parent:
+                    raise HTTPException(status_code=404, detail="Parent comment not found")
+
+            comment = GroupComment(
+                post_id=post_id,
+                user_id=current_user.id,
+                text=data.text,
+                parent_comment_id=parent_comment_id,
+            )
+
+            session.add(comment)
+            session.commit()
+            session.refresh(comment)
+
+            return {
+                "message": "Comment created successfully",
+                "id": f"comment_{comment.id}",
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating group comment: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error creating comment: {str(e)}")
+
+
+@app.get("/group/comments/{post_id}", response_model=List[ViewGroupCommentSchema])
+def get_group_comments(post_id: str, current_user: User = Depends(get_current_user)):
+    """
+    Get comments (and replies) for a group post.
+    """
+    try:
+        with Session(engine) as session:
+            # Parse post ID
+            try:
+                if post_id.startswith("post_"):
+                    numeric_post_id = int(post_id.replace("post_", ""))
+                else:
+                    numeric_post_id = int(post_id)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid postId format")
+
+            post = session.query(GroupPost).filter(GroupPost.id == numeric_post_id).first()
+            if not post:
+                raise HTTPException(status_code=404, detail="Group post not found")
+
+            comments = (
+                session.query(GroupComment)
+                .filter(GroupComment.post_id == numeric_post_id)
+                .order_by(GroupComment.created_at.asc())
+                .all()
+            )
+
+            results: List[ViewGroupCommentSchema] = []
+            for c in comments:
+                user = session.query(User).filter(User.id == c.user_id).first()
+                if not user:
+                    continue
+
+                like_count = (
+                    session.query(GroupCommentLike)
+                    .filter(GroupCommentLike.comment_id == c.id)
+                    .count()
+                )
+                has_liked = (
+                    session.query(GroupCommentLike)
+                    .filter(
+                        GroupCommentLike.comment_id == c.id,
+                        GroupCommentLike.user_id == current_user.id,
+                    )
+                    .first()
+                    is not None
+                )
+
+                results.append(
+                    ViewGroupCommentSchema(
+                        id=f"comment_{c.id}",
+                        postId=f"post_{c.post_id}",
+                        parentCommentId=f"comment_{c.parent_comment_id}"
+                        if c.parent_comment_id is not None
+                        else None,
+                        text=c.text,
+                        user={
+                            "id": f"user_{user.id}",
+                            "name": user.name,
+                            "role": user.role,
+                        },
+                        likeCount=like_count,
+                        hasLiked=has_liked,
+                        createdAt=c.created_at.isoformat(),
+                    )
+                )
+
+            return results
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching group comments: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error fetching comments: {str(e)}")
+
+
+@app.post("/group/comments/{comment_id}/toggle-like")
+def toggle_group_comment_like(comment_id: int, current_user: User = Depends(get_current_user)):
+    """
+    Like/unlike a group comment (or reply).
+    """
+    try:
+        with Session(engine) as session:
+            comment = session.query(GroupComment).filter(GroupComment.id == comment_id).first()
+            if not comment:
+                raise HTTPException(status_code=404, detail="Comment not found")
+
+            existing = session.query(GroupCommentLike).filter(
+                GroupCommentLike.comment_id == comment_id,
+                GroupCommentLike.user_id == current_user.id,
+            ).first()
+
+            if existing:
+                session.delete(existing)
+                has_liked = False
+            else:
+                new_like = GroupCommentLike(
+                    comment_id=comment_id,
+                    user_id=current_user.id,
+                )
+                session.add(new_like)
+                has_liked = True
+
+            session.commit()
+
+            like_count = (
+                session.query(GroupCommentLike)
+                .filter(GroupCommentLike.comment_id == comment_id)
+                .count()
+            )
+
+            return {
+                "id": f"comment_{comment.id}",
+                "likeCount": like_count,
+                "hasLiked": has_liked,
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error toggling like on group comment: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error toggling like: {str(e)}")

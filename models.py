@@ -98,3 +98,61 @@ class GroupPost(SQLModel, table=True):
     group_id: int = Field(foreign_key="group.id", nullable=False)
     user_id: int = Field(foreign_key="user.id", nullable=False)
     created_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
+
+
+class CommunityPostLike(SQLModel, table=True):
+    """Likes on community posts"""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    post_id: int = Field(foreign_key="communitypost.id", nullable=False)
+    user_id: int = Field(foreign_key="user.id", nullable=False)
+    created_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
+
+
+class GroupPostLike(SQLModel, table=True):
+    """Likes on group posts"""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    post_id: int = Field(foreign_key="grouppost.id", nullable=False)
+    user_id: int = Field(foreign_key="user.id", nullable=False)
+    created_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
+
+
+class CommunityComment(SQLModel, table=True):
+    """Comments (and replies) on community posts"""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    post_id: int = Field(foreign_key="communitypost.id", nullable=False)
+    user_id: int = Field(foreign_key="user.id", nullable=False)
+    text: str = Field(sa_column=Column(Text, nullable=False))
+    parent_comment_id: Optional[int] = Field(
+        default=None,
+        sa_column=Column(Integer, nullable=True)
+    )  # Null for top-level comments, set for replies
+    created_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
+
+
+class GroupComment(SQLModel, table=True):
+    """Comments (and replies) on group posts"""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    post_id: int = Field(foreign_key="grouppost.id", nullable=False)
+    user_id: int = Field(foreign_key="user.id", nullable=False)
+    text: str = Field(sa_column=Column(Text, nullable=False))
+    parent_comment_id: Optional[int] = Field(
+        default=None,
+        sa_column=Column(Integer, nullable=True)
+    )
+    created_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
+
+
+class CommunityCommentLike(SQLModel, table=True):
+    """Likes on community comments (including replies)"""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    comment_id: int = Field(foreign_key="communitycomment.id", nullable=False)
+    user_id: int = Field(foreign_key="user.id", nullable=False)
+    created_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
+
+
+class GroupCommentLike(SQLModel, table=True):
+    """Likes on group comments (including replies)"""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    comment_id: int = Field(foreign_key="groupcomment.id", nullable=False)
+    user_id: int = Field(foreign_key="user.id", nullable=False)
+    created_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
