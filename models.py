@@ -72,6 +72,7 @@ class CommunityPost(SQLModel, table=True):
     category_id: int = Field(foreign_key="category.id", nullable=False)
     post_type: bool = Field(default=True, sa_column=Column(Boolean, nullable=False))  # True for public, False for private
     user_id: int = Field(foreign_key="user.id", nullable=False)
+    like_count: int = Field(default=0, sa_column=Column(Integer, nullable=False))  # Stored like count
     created_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
 
 
@@ -86,6 +87,14 @@ class Group(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
 
 
+class GroupMember(SQLModel, table=True):
+    """Model to track group memberships"""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    group_id: int = Field(foreign_key="group.id", nullable=False)
+    user_id: int = Field(foreign_key="user.id", nullable=False)
+    joined_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
+
+
 class GroupPost(SQLModel, table=True):
     """Model to store posts within groups"""
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -97,6 +106,7 @@ class GroupPost(SQLModel, table=True):
     post_type: bool = Field(default=True, sa_column=Column(Boolean, nullable=False))  # True for public, False for private
     group_id: int = Field(foreign_key="group.id", nullable=False)
     user_id: int = Field(foreign_key="user.id", nullable=False)
+    like_count: int = Field(default=0, sa_column=Column(Integer, nullable=False))  # Stored like count
     created_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
 
 

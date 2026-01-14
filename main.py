@@ -54,6 +54,7 @@ from models import (
     CommunityPost,
     Group,
     GroupPost,
+    GroupMember,
     CommunityPostLike,
     GroupPostLike,
     CommunityComment,
@@ -1246,12 +1247,23 @@ def view_posts(current_user: User = Depends(get_current_user)):
                 if not category:
                     continue
 
-                # Likes info
-                like_count = session.query(CommunityPostLike).filter(CommunityPostLike.post_id == post.id).count()
+                # Likes info - use stored count
                 has_liked = session.query(CommunityPostLike).filter(
                     CommunityPostLike.post_id == post.id,
                     CommunityPostLike.user_id == current_user.id
                 ).first() is not None
+                
+                # Check if post is anonymous (post_type stores isAnonymous value)
+                if post.post_type:  # True means anonymous
+                    user_info = {
+                        "id": "anonymous",
+                        "name": "Anonymous"
+                    }
+                else:  # False means not anonymous
+                    user_info = {
+                        "id": f"user_{user.id}",
+                        "name": user.name
+                    }
                 
                 post_list.append({
                     "id": f"post_{post.id}",
@@ -1264,12 +1276,9 @@ def view_posts(current_user: User = Depends(get_current_user)):
                         "name": category.name
                     },
                     "isAnonymous": post.post_type,
-                    "likeCount": like_count,
+                    "likeCount": post.like_count,
                     "hasLiked": has_liked,
-                    "user": {
-                        "id": f"user_{user.id}",
-                        "name": user.name
-                    },
+                    "user": user_info,
                     "postedTime": post.created_at.isoformat()
                 })
             
@@ -1284,7 +1293,7 @@ def toggle_community_post_like(post_id: int, current_user: User = Depends(get_cu
     """
     Like/unlike a community post.
     If the user has already liked the post, this will unlike it.
-    Returns current likeCount and hasLiked.
+    Updates and returns the stored likeCount and hasLiked.
     """
     try:
         with Session(engine) as session:
@@ -1298,25 +1307,27 @@ def toggle_community_post_like(post_id: int, current_user: User = Depends(get_cu
             ).first()
 
             if existing_like:
-                # Unlike
+                # Unlike - decrement count
                 session.delete(existing_like)
+                post.like_count = max(0, post.like_count - 1)  # Ensure count doesn't go below 0
                 has_liked = False
             else:
-                # Like
+                # Like - increment count
                 new_like = CommunityPostLike(
                     post_id=post_id,
                     user_id=current_user.id
                 )
                 session.add(new_like)
+                post.like_count = post.like_count + 1
                 has_liked = True
 
+            session.add(post)
             session.commit()
-
-            like_count = session.query(CommunityPostLike).filter(CommunityPostLike.post_id == post_id).count()
+            session.refresh(post)
 
             return {
                 "id": f"post_{post.id}",
-                "likeCount": like_count,
+                "likeCount": post.like_count,
                 "hasLiked": has_liked
             }
     except HTTPException:
@@ -1861,6 +1872,14 @@ def create_group(data: CreateGroupSchema, current_user: User = Depends(get_curre
             session.commit()
             session.refresh(new_group)
             
+            # Automatically add creator as a member
+            group_member = GroupMember(
+                group_id=new_group.id,
+                user_id=current_user.id
+            )
+            session.add(group_member)
+            session.commit()
+            
             return {
                 "message": "Group created successfully",
                 "groupId": f"group_{new_group.id}"
@@ -1870,6 +1889,137 @@ def create_group(data: CreateGroupSchema, current_user: User = Depends(get_curre
     except Exception as e:
         logger.error(f"Error creating group: {str(e)}", exc_info=True)
         raise HTTPException(status_code=503, detail=f"Error creating group: {str(e)}")
+
+
+@app.post("/join-group/{group_id}")
+def join_group(group_id: int, current_user: User = Depends(get_current_user)):
+    """
+    Join a group. Adds the current user as a member of the specified group.
+    Use the numeric ID (e.g., 1, 2, 3) not "group_1" format.
+    """
+    try:
+        with Session(engine) as session:
+            # Check if group exists
+            group = session.query(Group).filter(Group.id == group_id).first()
+            if not group:
+                raise HTTPException(status_code=404, detail="Group not found")
+
+            # Check if user is already a member
+            existing_member = session.query(GroupMember).filter(
+                GroupMember.group_id == group_id,
+                GroupMember.user_id == current_user.id
+            ).first()
+
+            if existing_member:
+                raise HTTPException(status_code=400, detail="You are already a member of this group")
+
+            # Add user as member
+            new_member = GroupMember(
+                group_id=group_id,
+                user_id=current_user.id
+            )
+            session.add(new_member)
+            session.commit()
+            session.refresh(new_member)
+
+            return {
+                "message": "Successfully joined the group",
+                "groupId": f"group_{group.id}",
+                "groupName": group.group_name
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error joining group: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error joining group: {str(e)}")
+
+
+@app.get("/user/my-groups/created")
+def get_my_created_groups(current_user: User = Depends(get_current_user)):
+    """
+    Get all groups created by the current user.
+    """
+    try:
+        with Session(engine) as session:
+            groups = session.query(Group).filter(
+                Group.created_by_id == current_user.id
+            ).order_by(Group.created_at.desc()).all()
+            
+            group_list = []
+            for group in groups:
+                # Get category info
+                category = session.query(Category).filter(Category.id == group.category_id).first()
+                if not category:
+                    continue
+                
+                group_list.append({
+                    "groupId": f"group_{group.id}",
+                    "groupName": group.group_name,
+                    "groupDescription": group.group_description,
+                    "image": group.image,
+                    "category": {
+                        "id": f"cat_{category.id:03d}",
+                        "name": category.name
+                    },
+                    "createdAt": group.created_at.isoformat()
+                })
+            
+            return group_list
+    except Exception as e:
+        logger.error(f"Error fetching created groups: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error fetching created groups: {str(e)}")
+
+
+@app.get("/user/my-groups/joined")
+def get_my_joined_groups(current_user: User = Depends(get_current_user)):
+    """
+    Get all groups the current user has joined (including groups they created).
+    """
+    try:
+        with Session(engine) as session:
+            # Get all group memberships for current user
+            memberships = session.query(GroupMember).filter(
+                GroupMember.user_id == current_user.id
+            ).order_by(GroupMember.joined_at.desc()).all()
+            
+            group_list = []
+            for membership in memberships:
+                # Get group details
+                group = session.query(Group).filter(Group.id == membership.group_id).first()
+                if not group:
+                    continue
+                
+                # Get category info
+                category = session.query(Category).filter(Category.id == group.category_id).first()
+                if not category:
+                    continue
+                
+                # Get creator info
+                creator = session.query(User).filter(User.id == group.created_by_id).first()
+                if not creator:
+                    continue
+                
+                group_list.append({
+                    "groupId": f"group_{group.id}",
+                    "groupName": group.group_name,
+                    "groupDescription": group.group_description,
+                    "image": group.image,
+                    "category": {
+                        "id": f"cat_{category.id:03d}",
+                        "name": category.name
+                    },
+                    "createdBy": {
+                        "id": f"user_{creator.id}",
+                        "name": creator.name
+                    },
+                    "joinedAt": membership.joined_at.isoformat(),
+                    "createdAt": group.created_at.isoformat()
+                })
+            
+            return group_list
+    except Exception as e:
+        logger.error(f"Error fetching joined groups: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error fetching joined groups: {str(e)}")
 
 
 @app.get("/view-group")
@@ -2188,12 +2338,23 @@ def view_group_posts(current_user: User = Depends(get_current_user)):
                 if not category:
                     continue
 
-                # Likes info
-                like_count = session.query(GroupPostLike).filter(GroupPostLike.post_id == post.id).count()
+                # Likes info - use stored count
                 has_liked = session.query(GroupPostLike).filter(
                     GroupPostLike.post_id == post.id,
                     GroupPostLike.user_id == current_user.id
                 ).first() is not None
+                
+                # Check if post is anonymous (post_type stores isAnonymous value)
+                if post.post_type:  # True means anonymous
+                    user_info = {
+                        "id": "anonymous",
+                        "name": "Anonymous"
+                    }
+                else:  # False means not anonymous
+                    user_info = {
+                        "id": f"user_{user.id}",
+                        "name": user.name
+                    }
                 
                 post_list.append({
                     "id": f"post_{post.id}",
@@ -2203,16 +2364,13 @@ def view_group_posts(current_user: User = Depends(get_current_user)):
                     "image": post.image,
                     "tags": json.loads(post.tags) if post.tags else [],
                     "isAnonymous": post.post_type,
-                    "likeCount": like_count,
+                    "likeCount": post.like_count,
                     "hasLiked": has_liked,
                     "category": {
                         "id": f"cat_{category.id:03d}",
                         "name": category.name
                     },
-                    "user": {
-                        "id": f"user_{user.id}",
-                        "name": user.name
-                    },
+                    "user": user_info,
                     "postedTime": post.created_at.isoformat()
                 })
             
@@ -2342,7 +2500,7 @@ def toggle_group_post_like(post_id: int, current_user: User = Depends(get_curren
     """
     Like/unlike a group post.
     If the user has already liked the post, this will unlike it.
-    Returns current likeCount and hasLiked.
+    Updates and returns the stored likeCount and hasLiked.
     """
     try:
         with Session(engine) as session:
@@ -2356,25 +2514,27 @@ def toggle_group_post_like(post_id: int, current_user: User = Depends(get_curren
             ).first()
 
             if existing_like:
-                # Unlike
+                # Unlike - decrement count
                 session.delete(existing_like)
+                post.like_count = max(0, post.like_count - 1)  # Ensure count doesn't go below 0
                 has_liked = False
             else:
-                # Like
+                # Like - increment count
                 new_like = GroupPostLike(
                     post_id=post_id,
                     user_id=current_user.id
                 )
                 session.add(new_like)
+                post.like_count = post.like_count + 1
                 has_liked = True
 
+            session.add(post)
             session.commit()
-
-            like_count = session.query(GroupPostLike).filter(GroupPostLike.post_id == post_id).count()
+            session.refresh(post)
 
             return {
                 "id": f"post_{post.id}",
-                "likeCount": like_count,
+                "likeCount": post.like_count,
                 "hasLiked": has_liked
             }
     except HTTPException:
