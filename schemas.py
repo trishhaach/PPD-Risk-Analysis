@@ -1,4 +1,5 @@
 from pydantic import BaseModel, EmailStr, field_validator, Field
+from pydantic.config import ConfigDict
 from typing import Optional, List
 
 
@@ -61,6 +62,71 @@ class EPDSAnswerSchema(BaseModel):
         if v not in [0, 1, 2, 3]:
             raise ValueError('Each answer must be 0, 1, 2, or 3')
         return v
+
+
+# ==================== ML-based PPD Risk (Symptom Questionnaire) Schemas ====================
+
+class PPDRiskAssessmentRequestSchema(BaseModel):
+    """
+    Request schema for ML-based PPD risk assessment.
+    Uses field aliases that match the ML engineer's question IDs (including spaces and punctuation),
+    so the frontend can send exactly the same keys the ML service expects.
+    """
+    model_config = ConfigDict(populate_by_name=True)
+
+    need_for_support: str = Field(alias="Need for Support")
+    recieved_support: str = Field(alias="Recieved Support")
+    abuse: str = Field(alias="Abuse")
+    disease_before_pregnancy: str = Field(alias="Disease before pregnancy")
+    occupation_before_latest_pregnancy: str = Field(alias="Occupation before latest pregnancy")
+    pregnancy_plan: str = Field(alias="Pregnancy plan")
+    relationship_with_husband: str = Field(alias="Relationship with husband")
+    major_changes_or_losses_during_pregnancy: str = Field(alias="Major changes or losses during pregnancy")
+    relationship_with_in_laws: str = Field(alias="Relationship with the in-laws")
+    birth_compliancy: str = Field(alias="Birth compliancy")
+    relationship_between_father_and_newborn: str = Field(alias="Relationship between father and newborn")
+    education_level: str = Field(alias="Education Level")
+    family_type: str = Field(alias="Family type")
+    diseases_during_pregnancy: str = Field(alias="Diseases during pregnancy")
+    trust_and_share_feelings: str = Field(alias="Trust and share feelings")
+    relationship_with_newborn: str = Field(alias="Relationship with the newborn")
+    occupation_after_latest_childbirth: str = Field(alias="Occupation After Your Latest Childbirth")
+    age: float = Field(alias="Age", ge=18.0, le=45.0)
+    addiction: str = Field(alias="Addiction")
+    husbands_education_level: str = Field(alias="Husband's education level")
+
+    @field_validator(
+        "need_for_support",
+        "recieved_support",
+        "abuse",
+        "disease_before_pregnancy",
+        "occupation_before_latest_pregnancy",
+        "pregnancy_plan",
+        "relationship_with_husband",
+        "major_changes_or_losses_during_pregnancy",
+        "relationship_with_in_laws",
+        "birth_compliancy",
+        "relationship_between_father_and_newborn",
+        "education_level",
+        "family_type",
+        "diseases_during_pregnancy",
+        "trust_and_share_feelings",
+        "relationship_with_newborn",
+        "occupation_after_latest_childbirth",
+        "addiction",
+        "husbands_education_level",
+    )
+    def validate_non_empty(cls, v: str):
+        if v is None or (isinstance(v, str) and len(v.strip()) == 0):
+            raise ValueError("Field cannot be empty")
+        return v
+
+
+class PPDRiskAssessmentResponseSchema(BaseModel):
+    id: str
+    result: dict
+    createdAt: str
+
 
 
 # Blog Schemas

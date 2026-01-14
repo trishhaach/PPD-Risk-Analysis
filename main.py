@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 import smtplib
 from email.message import EmailMessage
 import json
+import httpx
 from fastapi import Depends, FastAPI, HTTPException, BackgroundTasks, Query, File, UploadFile
 from fastapi.responses import JSONResponse
 
@@ -49,6 +50,7 @@ from database import init_db, engine
 from models import (
     User,
     EPDSResult,
+    PPDRiskAssessment,
     Blog,
     Category,
     CommunityPost,
@@ -70,6 +72,8 @@ from schemas import (
     ResetPasswordSchema,
     UpdateNameSchema,
     EPDSAnswerSchema,
+    PPDRiskAssessmentRequestSchema,
+    PPDRiskAssessmentResponseSchema,
     BlogCreateSchema,
     BlogUpdateSchema,
     BlogListItemSchema,
@@ -107,6 +111,89 @@ SECRET_KEY = os.getenv("SAKHI_SECRET_KEY", "dev-secret-change-me")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 PASSWORD_SALT = os.getenv("SAKHI_PASSWORD_SALT", "dev-salt-change-me")
+
+# ==================== ML (PPD Risk Assessment) Configuration ====================
+# Base URL for the external ML service (FastAPI hosted on HuggingFace Space)
+PPD_ML_BASE_URL = os.getenv("PPD_ML_BASE_URL", "https://appledog00-ppd-risk-api.hf.space").rstrip("/")
+# Optional: set this to skip discovery and directly call the ML POST endpoint
+PPD_ML_PREDICT_URL = os.getenv("PPD_ML_PREDICT_URL")  # full URL e.g. https://.../predict
+
+# Cache discovered predict URL to avoid fetching openapi.json on every request
+_ppd_ml_predict_url_cache: Optional[str] = None
+
+# The form config your ML engineer provided (returned to frontend as-is)
+PPD_RISK_FORM_CONFIG = {
+    "app_title": "PPD Risk Assessment",
+    "description": "Enter patient details to screen for Postpartum Depression risk.",
+    "fields": [
+        {"id": "Need for Support", "label": "Select Need for Support", "type": "dropdown", "options": ["high", "low", "medium", "none"], "default": "high"},
+        {"id": "Recieved Support", "label": "Select Recieved Support", "type": "dropdown", "options": ["high", "low", "medium"], "default": "high"},
+        {"id": "Abuse", "label": "Select Abuse", "type": "dropdown", "options": ["no", "yes"], "default": "no"},
+        {"id": "Disease before pregnancy", "label": "Select Disease before pregnancy", "type": "dropdown", "options": ["1.2", "chronic disease", "non-chronic disease", "none"], "default": "1.2"},
+        {"id": "Occupation before latest pregnancy", "label": "Select Occupation before latest pregnancy", "type": "dropdown", "options": ["business", "doctor", "house wife", "housewife", "other", "service", "student", "teacher"], "default": "business"},
+        {"id": "Pregnancy plan", "label": "Select Pregnancy plan", "type": "dropdown", "options": ["no", "yes"], "default": "no"},
+        {"id": "Relationship with husband", "label": "Select Relationship with husband", "type": "dropdown", "options": ["bad", "friendly", "good", "neutral", "poor"], "default": "bad"},
+        {"id": "Major changes or losses during pregnancy", "label": "Select Major changes or losses during pregnancy", "type": "dropdown", "options": ["no", "yes"], "default": "no"},
+        {"id": "Relationship with the in-laws", "label": "Select Relationship with the in-laws", "type": "dropdown", "options": ["bad", "friendly", "good", "neutral", "poor"], "default": "bad"},
+        {"id": "Birth compliancy", "label": "Select Birth compliancy", "type": "dropdown", "options": ["no", "yes"], "default": "no"},
+        {"id": "Relationship between father and newborn", "label": "Select Relationship between father and newborn", "type": "dropdown", "options": ["bad", "good", "neutral", "very good"], "default": "bad"},
+        {"id": "Education Level", "label": "Select Education Level", "type": "dropdown", "options": ["college", "high school", "primary school", "university", "unknown"], "default": "college"},
+        {"id": "Family type", "label": "Select Family type", "type": "dropdown", "options": ["joint", "nuclear"], "default": "joint"},
+        {"id": "Diseases during pregnancy", "label": "Select Diseases during pregnancy", "type": "dropdown", "options": ["chronic disease", "non-chronic disease", "none"], "default": "chronic disease"},
+        {"id": "Trust and share feelings", "label": "Select Trust and share feelings", "type": "dropdown", "options": ["no", "yes"], "default": "no"},
+        {"id": "Relationship with the newborn", "label": "Select Relationship with the newborn", "type": "dropdown", "options": ["bad", "good", "neutral", "very good"], "default": "bad"},
+        {"id": "Occupation After Your Latest Childbirth", "label": "Select Occupation After Your Latest Childbirth", "type": "dropdown", "options": ["business", "doctor", "house wife", "housewife", "other", "service", "student", "teacher"], "default": "business"},
+        {"id": "Age", "label": "Enter Age", "type": "number", "min": 18.0, "max": 45.0, "default": 18.0},
+        {"id": "Addiction", "label": "Select Addiction", "type": "dropdown", "options": ["Drinking", "Drugs", "Smoking"], "default": "Drinking"},
+        {"id": "Husband's education level", "label": "Select Husband's education level", "type": "dropdown", "options": ["College", "High School", "High school", "Primary School", "Primary school", "University"], "default": "College"},
+    ],
+}
+
+
+def _discover_ppd_ml_predict_url() -> str:
+    """
+    Discover the ML service POST endpoint by reading its OpenAPI spec.
+    This avoids hardcoding the predict path (since you only gave /docs).
+    """
+    global _ppd_ml_predict_url_cache
+
+    if PPD_ML_PREDICT_URL:
+        return PPD_ML_PREDICT_URL
+
+    if _ppd_ml_predict_url_cache:
+        return _ppd_ml_predict_url_cache
+
+    openapi_url = f"{PPD_ML_BASE_URL}/openapi.json"
+    try:
+        resp = httpx.get(openapi_url, timeout=15)
+        resp.raise_for_status()
+        spec = resp.json()
+    except Exception as e:
+        logger.error(f"Failed to fetch ML OpenAPI spec from {openapi_url}: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail="ML service is unavailable (cannot read OpenAPI spec)")
+
+    paths = spec.get("paths", {}) or {}
+    post_paths: List[str] = []
+    for path, methods in paths.items():
+        if isinstance(methods, dict) and "post" in methods:
+            post_paths.append(path)
+
+    if not post_paths:
+        logger.error(f"No POST paths found in ML OpenAPI spec from {openapi_url}")
+        raise HTTPException(status_code=503, detail="ML service OpenAPI has no POST endpoint")
+
+    # Prefer something that looks like a predict endpoint; otherwise first POST path.
+    preferred = None
+    for p in post_paths:
+        if any(k in p.lower() for k in ["predict", "ppd", "risk", "assess"]):
+            preferred = p
+            break
+    chosen_path = preferred or post_paths[0]
+
+    _ppd_ml_predict_url_cache = f"{PPD_ML_BASE_URL}{chosen_path}"
+    logger.info(f"Discovered PPD ML predict URL: {_ppd_ml_predict_url_cache}")
+    return _ppd_ml_predict_url_cache
+
 
 # Supabase Storage Configuration
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -760,6 +847,130 @@ def get_epds_result(result_id: int, current_user: User = Depends(get_current_use
     except Exception as e:
         logger.error(f"Error fetching EPDS result: {str(e)}", exc_info=True)
         raise HTTPException(status_code=503, detail=f"Error fetching screening result: {str(e)}")
+
+
+# ==================== ML-based PPD Risk (Symptom Questionnaire) ====================
+
+@app.get("/symptom/ppd-risk/form")
+def get_ppd_risk_form():
+    """
+    Returns the questionnaire (questions + options) for the PPD Risk Assessment feature.
+    Frontend uses this to build the UI form dynamically.
+    """
+    return PPD_RISK_FORM_CONFIG
+
+
+@app.post("/symptom/ppd-risk/assess", response_model=PPDRiskAssessmentResponseSchema)
+def assess_ppd_risk(
+    payload: PPDRiskAssessmentRequestSchema,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Runs ML-based PPD risk assessment by forwarding the user's answers to the external ML service.
+    Stores both request + ML response in DB for history.
+    """
+    try:
+        predict_url = _discover_ppd_ml_predict_url()
+
+        # Convert to dict with ML-friendly keys (aliases)
+        ml_payload = payload.model_dump(by_alias=True)
+
+        # Call the ML service
+        try:
+            # The ML service expects a top-level "data" field (per its 422 error: missing body.data)
+            ml_resp = httpx.post(predict_url, json={"data": ml_payload}, timeout=30)
+            ml_resp.raise_for_status()
+            ml_result = ml_resp.json()
+        except httpx.HTTPStatusError as e:
+            logger.error(f"ML service error: {str(e)}; body={e.response.text}", exc_info=True)
+            raise HTTPException(status_code=503, detail="ML service returned an error")
+        except Exception as e:
+            logger.error(f"Failed calling ML service at {predict_url}: {str(e)}", exc_info=True)
+            raise HTTPException(status_code=503, detail="ML service is unavailable")
+
+        # Store in DB
+        with Session(engine) as session:
+            record = PPDRiskAssessment(
+                user_id=current_user.id,
+                ml_endpoint=predict_url,
+                answers_json=json.dumps(ml_payload),
+                ml_response_json=json.dumps(ml_result),
+            )
+            session.add(record)
+            session.commit()
+            session.refresh(record)
+
+            return {
+                "id": f"ppd_risk_{record.id}",
+                "result": ml_result,
+                "createdAt": record.created_at.isoformat(),
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error assessing PPD risk: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error assessing PPD risk: {str(e)}")
+
+
+@app.get("/symptom/ppd-risk/history")
+def get_ppd_risk_history(
+    current_user: User = Depends(get_current_user),
+    limit: int = Query(20, ge=1, le=100),
+):
+    """
+    Returns the user's ML-based PPD risk assessment history (latest first).
+    """
+    try:
+        with Session(engine) as session:
+            rows = (
+                session.query(PPDRiskAssessment)
+                .filter(PPDRiskAssessment.user_id == current_user.id)
+                .order_by(PPDRiskAssessment.created_at.desc())
+                .limit(limit)
+                .all()
+            )
+
+            return [
+                {
+                    "id": f"ppd_risk_{r.id}",
+                    "result": json.loads(r.ml_response_json) if r.ml_response_json else {},
+                    "createdAt": r.created_at.isoformat(),
+                }
+                for r in rows
+            ]
+    except Exception as e:
+        logger.error(f"Error fetching PPD risk history: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error fetching PPD risk history: {str(e)}")
+
+
+@app.get("/symptom/ppd-risk/{result_id}")
+def get_ppd_risk_result(
+    result_id: int,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Get a specific ML-based PPD risk assessment result by numeric ID.
+    """
+    try:
+        with Session(engine) as session:
+            r = (
+                session.query(PPDRiskAssessment)
+                .filter(PPDRiskAssessment.id == result_id, PPDRiskAssessment.user_id == current_user.id)
+                .first()
+            )
+            if not r:
+                raise HTTPException(status_code=404, detail="PPD risk result not found")
+
+            return {
+                "id": f"ppd_risk_{r.id}",
+                "result": json.loads(r.ml_response_json) if r.ml_response_json else {},
+                "createdAt": r.created_at.isoformat(),
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching PPD risk result: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error fetching PPD risk result: {str(e)}")
 
 
 # ==================== BLOG API ENDPOINTS ====================

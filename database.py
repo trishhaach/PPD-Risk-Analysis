@@ -11,7 +11,6 @@ def init_db():
         import models  
         SQLModel.metadata.create_all(engine)
         print("Database initialized!")
-        
         # Seed default categories if they don't exist
         seed_default_categories()
     except Exception as e:

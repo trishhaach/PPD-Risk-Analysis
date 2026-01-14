@@ -36,6 +36,19 @@ class EPDSResult(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
 
 
+class PPDRiskAssessment(SQLModel, table=True):
+    """
+    Model to store ML-based PPD risk assessment results (symptom/questionnaire-based).
+    Stores both the answers payload sent to the ML service and the ML response for auditing.
+    """
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", nullable=False)
+    ml_endpoint: Optional[str] = Field(default=None, sa_column=Column(String(500), nullable=True))
+    answers_json: str = Field(sa_column=Column(Text, nullable=False))  # JSON string
+    ml_response_json: str = Field(sa_column=Column(Text, nullable=False))  # JSON string
+    created_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
+
+
 class Blog(SQLModel, table=True):
     """Model to store blog posts"""
     id: Optional[int] = Field(default=None, primary_key=True)
