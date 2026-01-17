@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 import hashlib
 import logging
 import os
+import uuid
 from typing import Optional, List
 
 from dotenv import load_dotenv
@@ -63,6 +64,12 @@ from models import (
     GroupComment,
     CommunityCommentLike,
     GroupCommentLike,
+    ContributorProfile,
+    ContributorEducation,
+    ContributorExperience,
+    ContributorCertification,
+    ContributorExpertise,
+    ContributorPublication,
 )
 from schemas import (
     SignupSchema,
@@ -95,6 +102,12 @@ from schemas import (
     ViewCommentSchema,
     CreateGroupCommentSchema,
     ViewGroupCommentSchema,
+    Step1BasicProfileSchema,
+    Step2EducationSchema,
+    Step3ExperienceSchema,
+    Step4CertificationsSchema,
+    Step5ExpertiseAndPublicationsSchema,
+    ContributorProfileResponseSchema,
 )
 
 # Logging is already set up above (before Supabase import)
@@ -2932,3 +2945,440 @@ def toggle_group_comment_like(comment_id: int, current_user: User = Depends(get_
     except Exception as e:
         logger.error(f"Error toggling like on group comment: {str(e)}", exc_info=True)
         raise HTTPException(status_code=503, detail=f"Error toggling like: {str(e)}")
+
+
+# ==================== Contributor Profile Setup APIs ====================
+
+@app.post("/contributor/profile/step1-basic-profile")
+def create_step1_basic_profile(
+    data: Step1BasicProfileSchema,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Step 1: Create basic profile information.
+    All fields are required. Returns error if profile already exists for this user.
+    """
+    try:
+        with Session(engine) as session:
+            # Check if profile already exists
+            existing_profile = session.query(ContributorProfile).filter(
+                ContributorProfile.user_id == current_user.id
+            ).first()
+            
+            if existing_profile:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Profile already exists for this user. Cannot create duplicate profile."
+                )
+            
+            # Create new profile
+            new_profile = ContributorProfile(
+                user_id=current_user.id,
+                first_name=data.first_name,
+                last_name=data.last_name,
+                professional_title=data.professional_title,
+                short_bio=data.short_bio
+            )
+            session.add(new_profile)
+            session.commit()
+            
+            return {
+                "message": "Step 1 profile created successfully",
+                "step1_basic_profile": {
+                    "first_name": data.first_name,
+                    "last_name": data.last_name,
+                    "professional_title": data.professional_title,
+                    "short_bio": data.short_bio
+                }
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating step 1 profile: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error creating profile: {str(e)}")
+
+
+@app.post("/contributor/profile/step2-education")
+def create_step2_education(
+    data: Step2EducationSchema,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Step 2: Create education entries.
+    All fields are required. Returns error if education_id already exists for this user.
+    """
+    try:
+        with Session(engine) as session:
+            # Check for duplicate education_ids
+            existing_education_ids = {
+                edu.education_id
+                for edu in session.query(ContributorEducation).filter(
+                    ContributorEducation.user_id == current_user.id,
+                    ContributorEducation.education_id.in_([e.education_id for e in data.education])
+                ).all()
+            }
+            
+            duplicate_ids = [edu.education_id for edu in data.education if edu.education_id in existing_education_ids]
+            if duplicate_ids:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Education entries with these IDs already exist: {', '.join(duplicate_ids)}"
+                )
+            
+            # Create new education entries
+            created_educations = []
+            for edu in data.education:
+                new_education = ContributorEducation(
+                    user_id=current_user.id,
+                    education_id=edu.education_id,
+                    institution_name=edu.institution_name,
+                    degree=edu.degree,
+                    year_of_graduation=edu.year_of_graduation,
+                    field_of_study=edu.field_of_study
+                )
+                session.add(new_education)
+                created_educations.append({
+                    "education_id": edu.education_id,
+                    "institution_name": edu.institution_name,
+                    "degree": edu.degree,
+                    "year_of_graduation": edu.year_of_graduation,
+                    "field_of_study": edu.field_of_study
+                })
+            
+            session.commit()
+            
+            return {
+                "message": "Step 2 education created successfully",
+                "step2_education": created_educations
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating step 2 education: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error creating education: {str(e)}")
+
+
+@app.post("/contributor/profile/step3-experience")
+def create_step3_experience(
+    data: Step3ExperienceSchema,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Step 3: Create work experience entries.
+    All fields are required. Returns error if experience_id already exists for this user.
+    """
+    try:
+        with Session(engine) as session:
+            # Check for duplicate experience_ids
+            existing_experience_ids = {
+                exp.experience_id
+                for exp in session.query(ContributorExperience).filter(
+                    ContributorExperience.user_id == current_user.id,
+                    ContributorExperience.experience_id.in_([e.experience_id for e in data.experience])
+                ).all()
+            }
+            
+            duplicate_ids = [exp.experience_id for exp in data.experience if exp.experience_id in existing_experience_ids]
+            if duplicate_ids:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Experience entries with these IDs already exist: {', '.join(duplicate_ids)}"
+                )
+            
+            # Create new experience entries
+            created_experiences = []
+            for exp in data.experience:
+                new_experience = ContributorExperience(
+                    user_id=current_user.id,
+                    experience_id=exp.experience_id,
+                    job_title=exp.job_title,
+                    company_name=exp.company_name,
+                    start_month=exp.start_month,
+                    start_year=exp.start_year,
+                    end_month=exp.end_month,
+                    end_year=exp.end_year,
+                    is_currently_working=exp.is_currently_working,
+                    key_responsibilities=exp.key_responsibilities
+                )
+                session.add(new_experience)
+                created_experiences.append({
+                    "experience_id": exp.experience_id,
+                    "job_title": exp.job_title,
+                    "company_name": exp.company_name,
+                    "start_month": exp.start_month,
+                    "start_year": exp.start_year,
+                    "end_month": exp.end_month,
+                    "end_year": exp.end_year,
+                    "is_currently_working": exp.is_currently_working,
+                    "key_responsibilities": exp.key_responsibilities
+                })
+            
+            session.commit()
+            
+            return {
+                "message": "Step 3 experience created successfully",
+                "step3_experience": created_experiences
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating step 3 experience: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error creating experience: {str(e)}")
+
+
+@app.post("/contributor/profile/step4-certifications")
+def create_step4_certifications(
+    data: Step4CertificationsSchema,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Step 4: Create certification entries.
+    All fields are required (except expiration_date and credential_id which can be null).
+    Returns error if certification_id already exists for this user.
+    """
+    try:
+        with Session(engine) as session:
+            # Check for duplicate certification_ids
+            existing_certification_ids = {
+                cert.certification_id
+                for cert in session.query(ContributorCertification).filter(
+                    ContributorCertification.user_id == current_user.id,
+                    ContributorCertification.certification_id.in_([c.certification_id for c in data.certifications])
+                ).all()
+            }
+            
+            duplicate_ids = [cert.certification_id for cert in data.certifications if cert.certification_id in existing_certification_ids]
+            if duplicate_ids:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Certification entries with these IDs already exist: {', '.join(duplicate_ids)}"
+                )
+            
+            # Create new certification entries
+            created_certifications = []
+            for cert in data.certifications:
+                # Parse date_issued (handle various ISO formats)
+                date_issued_str = cert.date_issued
+                if date_issued_str.endswith('Z'):
+                    date_issued_str = date_issued_str.replace('Z', '+00:00')
+                elif '+' not in date_issued_str and 'T' in date_issued_str:
+                    date_issued_str = date_issued_str + '+00:00'
+                date_issued = datetime.fromisoformat(date_issued_str)
+                
+                expiration_date = None
+                if cert.expiration_date:
+                    exp_date_str = cert.expiration_date
+                    if exp_date_str.endswith('Z'):
+                        exp_date_str = exp_date_str.replace('Z', '+00:00')
+                    elif '+' not in exp_date_str and 'T' in exp_date_str:
+                        exp_date_str = exp_date_str + '+00:00'
+                    expiration_date = datetime.fromisoformat(exp_date_str)
+                
+                new_certification = ContributorCertification(
+                    user_id=current_user.id,
+                    certification_id=cert.certification_id,
+                    certification_name=cert.certification_name,
+                    issuing_organization=cert.issuing_organization,
+                    date_issued=date_issued,
+                    expiration_date=expiration_date,
+                    credential_id=cert.credential_id
+                )
+                session.add(new_certification)
+                created_certifications.append({
+                    "certification_id": cert.certification_id,
+                    "certification_name": cert.certification_name,
+                    "issuing_organization": cert.issuing_organization,
+                    "date_issued": cert.date_issued,
+                    "expiration_date": cert.expiration_date,
+                    "credential_id": cert.credential_id
+                })
+            
+            session.commit()
+            
+            return {
+                "message": "Step 4 certifications created successfully",
+                "step4_certifications": created_certifications
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating step 4 certifications: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error creating certifications: {str(e)}")
+
+
+@app.post("/contributor/profile/step5-expertise-and-publications")
+def create_step5_expertise_and_publications(
+    data: Step5ExpertiseAndPublicationsSchema,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Step 5: Create expertise topics and publications.
+    All fields are required. Returns error if publication_id already exists for this user.
+    Note: Expertise topics can have duplicates (same topic can be added multiple times).
+    """
+    try:
+        with Session(engine) as session:
+            # Check for duplicate publication_ids
+            existing_publication_ids = {
+                pub.publication_id
+                for pub in session.query(ContributorPublication).filter(
+                    ContributorPublication.user_id == current_user.id,
+                    ContributorPublication.publication_id.in_([p.publication_id for p in data.publications])
+                ).all()
+            }
+            
+            duplicate_ids = [pub.publication_id for pub in data.publications if pub.publication_id in existing_publication_ids]
+            if duplicate_ids:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Publication entries with these IDs already exist: {', '.join(duplicate_ids)}"
+                )
+            
+            # Create new expertise entries (duplicates allowed for expertise topics)
+            for topic in data.expertise_topics:
+                new_expertise = ContributorExpertise(
+                    user_id=current_user.id,
+                    topic=topic
+                )
+                session.add(new_expertise)
+            
+            # Create new publication entries
+            created_publications = []
+            for pub in data.publications:
+                new_publication = ContributorPublication(
+                    user_id=current_user.id,
+                    publication_id=pub.publication_id,
+                    title=pub.title,
+                    url=pub.url
+                )
+                session.add(new_publication)
+                created_publications.append({
+                    "publication_id": pub.publication_id,
+                    "title": pub.title,
+                    "url": pub.url
+                })
+            
+            session.commit()
+            
+            return {
+                "message": "Step 5 expertise and publications created successfully",
+                "step5_expertise_and_publications": {
+                    "expertise_topics": data.expertise_topics,
+                    "publications": created_publications
+                }
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating step 5 expertise and publications: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error creating expertise and publications: {str(e)}")
+
+
+@app.get("/contributor/profile", response_model=ContributorProfileResponseSchema)
+def get_contributor_profile(current_user: User = Depends(get_current_user)):
+    """
+    Get all profile information for the current user (all 5 steps).
+    Returns empty arrays/None for steps that haven't been completed yet.
+    """
+    try:
+        with Session(engine) as session:
+            # Step 1: Basic Profile
+            profile = session.query(ContributorProfile).filter(
+                ContributorProfile.user_id == current_user.id
+            ).first()
+            
+            step1_data = None
+            if profile:
+                step1_data = {
+                    "first_name": profile.first_name,
+                    "last_name": profile.last_name,
+                    "professional_title": profile.professional_title,
+                    "short_bio": profile.short_bio
+                }
+            
+            # Step 2: Education
+            education_list = session.query(ContributorEducation).filter(
+                ContributorEducation.user_id == current_user.id
+            ).all()
+            
+            step2_data = [
+                {
+                    "education_id": edu.education_id,
+                    "institution_name": edu.institution_name,
+                    "degree": edu.degree,
+                    "year_of_graduation": edu.year_of_graduation,
+                    "field_of_study": edu.field_of_study
+                }
+                for edu in education_list
+            ]
+            
+            # Step 3: Experience
+            experience_list = session.query(ContributorExperience).filter(
+                ContributorExperience.user_id == current_user.id
+            ).all()
+            
+            step3_data = [
+                {
+                    "experience_id": exp.experience_id,
+                    "job_title": exp.job_title,
+                    "company_name": exp.company_name,
+                    "start_month": exp.start_month,
+                    "start_year": exp.start_year,
+                    "end_month": exp.end_month,
+                    "end_year": exp.end_year,
+                    "is_currently_working": exp.is_currently_working,
+                    "key_responsibilities": exp.key_responsibilities
+                }
+                for exp in experience_list
+            ]
+            
+            # Step 4: Certifications
+            certification_list = session.query(ContributorCertification).filter(
+                ContributorCertification.user_id == current_user.id
+            ).all()
+            
+            step4_data = [
+                {
+                    "certification_id": cert.certification_id,
+                    "certification_name": cert.certification_name,
+                    "issuing_organization": cert.issuing_organization,
+                    "date_issued": cert.date_issued.isoformat(),
+                    "expiration_date": cert.expiration_date.isoformat() if cert.expiration_date else None,
+                    "credential_id": cert.credential_id
+                }
+                for cert in certification_list
+            ]
+            
+            # Step 5: Expertise and Publications
+            expertise_list = session.query(ContributorExpertise).filter(
+                ContributorExpertise.user_id == current_user.id
+            ).all()
+            
+            publication_list = session.query(ContributorPublication).filter(
+                ContributorPublication.user_id == current_user.id
+            ).all()
+            
+            step5_data = None
+            if expertise_list or publication_list:
+                step5_data = {
+                    "expertise_topics": [exp.topic for exp in expertise_list],
+                    "publications": [
+                        {
+                            "publication_id": pub.publication_id,
+                            "title": pub.title,
+                            "url": pub.url
+                        }
+                        for pub in publication_list
+                    ]
+                }
+            
+            return {
+                "step1_basic_profile": step1_data,
+                "step2_education": step2_data,
+                "step3_experience": step3_data,
+                "step4_certifications": step4_data,
+                "step5_expertise_and_publications": step5_data
+            }
+    except Exception as e:
+        logger.error(f"Error fetching contributor profile: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error fetching profile: {str(e)}")

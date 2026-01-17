@@ -2,6 +2,7 @@ from sqlmodel import SQLModel, Field
 from sqlalchemy import Column, String, Integer, DateTime, Text, Boolean, ARRAY, JSON
 from typing import Optional, List
 from datetime import datetime
+import uuid
 
 class User(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -179,3 +180,80 @@ class GroupCommentLike(SQLModel, table=True):
     comment_id: int = Field(foreign_key="groupcomment.id", nullable=False)
     user_id: int = Field(foreign_key="user.id", nullable=False)
     created_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
+
+
+# ==================== Contributor Profile Models ====================
+
+class ContributorProfile(SQLModel, table=True):
+    """Step 1: Basic profile information for contributors"""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", nullable=False, unique=True)
+    first_name: str = Field(sa_column=Column(String(100), nullable=False))
+    last_name: str = Field(sa_column=Column(String(100), nullable=False))
+    professional_title: str = Field(sa_column=Column(String(200), nullable=False))
+    short_bio: str = Field(sa_column=Column(Text, nullable=False))
+    created_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
+    updated_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
+
+
+class ContributorEducation(SQLModel, table=True):
+    """Step 2: Education entries for contributors"""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", nullable=False)
+    education_id: str = Field(sa_column=Column(String(36), nullable=False))  # UUID as string
+    institution_name: str = Field(sa_column=Column(String(200), nullable=False))
+    degree: str = Field(sa_column=Column(String(200), nullable=False))
+    year_of_graduation: str = Field(sa_column=Column(String(10), nullable=False))
+    field_of_study: str = Field(sa_column=Column(String(200), nullable=False))
+    created_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
+    updated_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
+
+
+class ContributorExperience(SQLModel, table=True):
+    """Step 3: Work experience entries for contributors"""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", nullable=False)
+    experience_id: str = Field(sa_column=Column(String(36), nullable=False))  # UUID as string
+    job_title: str = Field(sa_column=Column(String(200), nullable=False))
+    company_name: str = Field(sa_column=Column(String(200), nullable=False))
+    start_month: int = Field(sa_column=Column(Integer, nullable=False))  # 1-12
+    start_year: int = Field(sa_column=Column(Integer, nullable=False))
+    end_month: Optional[int] = Field(default=None, sa_column=Column(Integer, nullable=True))  # 1-12 or null
+    end_year: Optional[int] = Field(default=None, sa_column=Column(Integer, nullable=True))
+    is_currently_working: bool = Field(sa_column=Column(Boolean, nullable=False))
+    key_responsibilities: str = Field(sa_column=Column(Text, nullable=False))
+    created_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
+    updated_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
+
+
+class ContributorCertification(SQLModel, table=True):
+    """Step 4: Certification entries for contributors"""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", nullable=False)
+    certification_id: str = Field(sa_column=Column(String(36), nullable=False))  # UUID as string
+    certification_name: str = Field(sa_column=Column(String(200), nullable=False))
+    issuing_organization: str = Field(sa_column=Column(String(200), nullable=False))
+    date_issued: datetime = Field(sa_column=Column(DateTime, nullable=False))
+    expiration_date: Optional[datetime] = Field(default=None, sa_column=Column(DateTime, nullable=True))
+    credential_id: Optional[str] = Field(default=None, sa_column=Column(String(200), nullable=True))
+    created_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
+    updated_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
+
+
+class ContributorExpertise(SQLModel, table=True):
+    """Step 5: Expertise topics for contributors"""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", nullable=False)
+    topic: str = Field(sa_column=Column(String(200), nullable=False))
+    created_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
+
+
+class ContributorPublication(SQLModel, table=True):
+    """Step 5: Publication entries for contributors"""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", nullable=False)
+    publication_id: str = Field(sa_column=Column(String(36), nullable=False))  # UUID as string
+    title: str = Field(sa_column=Column(String(500), nullable=False))
+    url: str = Field(sa_column=Column(String(1000), nullable=False))
+    created_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
+    updated_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))

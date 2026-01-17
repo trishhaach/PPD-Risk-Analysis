@@ -403,3 +403,78 @@ class ViewGroupCommentSchema(BaseModel):
     hasLiked: bool
     createdAt: str
 
+
+# ==================== Contributor Profile Schemas ====================
+
+# Step 1: Basic Profile
+class Step1BasicProfileSchema(BaseModel):
+    first_name: str
+    last_name: str
+    professional_title: str
+    short_bio: str
+
+
+# Step 2: Education
+class EducationItemSchema(BaseModel):
+    education_id: str  # UUID
+    institution_name: str
+    degree: str
+    year_of_graduation: str
+    field_of_study: str
+
+
+class Step2EducationSchema(BaseModel):
+    education: List[EducationItemSchema]
+
+
+# Step 3: Experience
+class ExperienceItemSchema(BaseModel):
+    experience_id: str  # UUID
+    job_title: str
+    company_name: str
+    start_month: int = Field(..., ge=1, le=12)
+    start_year: int
+    end_month: Optional[int] = Field(None, ge=1, le=12)
+    end_year: Optional[int] = None
+    is_currently_working: bool
+    key_responsibilities: str
+
+
+class Step3ExperienceSchema(BaseModel):
+    experience: List[ExperienceItemSchema]
+
+
+# Step 4: Certifications
+class CertificationItemSchema(BaseModel):
+    certification_id: str  # UUID
+    certification_name: str
+    issuing_organization: str
+    date_issued: str  # ISO date string
+    expiration_date: Optional[str] = None  # ISO date string or null
+    credential_id: Optional[str] = None
+
+
+class Step4CertificationsSchema(BaseModel):
+    certifications: List[CertificationItemSchema]
+
+
+# Step 5: Expertise and Publications
+class PublicationItemSchema(BaseModel):
+    publication_id: str  # UUID
+    title: str
+    url: str
+
+
+class Step5ExpertiseAndPublicationsSchema(BaseModel):
+    expertise_topics: List[str]
+    publications: List[PublicationItemSchema]
+
+
+# Response Schema for GET all profile
+class ContributorProfileResponseSchema(BaseModel):
+    step1_basic_profile: Optional[dict] = None
+    step2_education: List[dict] = []
+    step3_experience: List[dict] = []
+    step4_certifications: List[dict] = []
+    step5_expertise_and_publications: Optional[dict] = None
+
