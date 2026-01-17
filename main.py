@@ -822,6 +822,34 @@ def get_epds_history(current_user: User = Depends(get_current_user)):
         raise HTTPException(status_code=503, detail=f"Error fetching screening history: {str(e)}")
 
 
+@app.get("/screening/count")
+def get_screening_counts(current_user: User = Depends(get_current_user)):
+    """
+    Get the total count of screenings done by the user.
+    Returns counts for both EPDS and PPD risk assessments.
+    """
+    try:
+        with Session(engine) as session:
+            # Count EPDS screenings
+            epds_count = session.query(EPDSResult).filter(
+                EPDSResult.user_id == current_user.id
+            ).count()
+            
+            # Count PPD risk assessments
+            ppd_count = session.query(PPDRiskAssessment).filter(
+                PPDRiskAssessment.user_id == current_user.id
+            ).count()
+            
+            return {
+                "epds_screening_count": epds_count,
+                "ppd_risk_assessment_count": ppd_count,
+                "total_screening_count": epds_count + ppd_count
+            }
+    except Exception as e:
+        logger.error(f"Error fetching screening counts: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error fetching screening counts: {str(e)}")
+
+
 @app.get("/epds-screen/{result_id}")
 def get_epds_result(result_id: int, current_user: User = Depends(get_current_user)):
     """
@@ -1821,6 +1849,145 @@ def update_post(post_id: int, post_data: UpdatePostSchema, current_user: User = 
     except Exception as e:
         logger.error(f"Error updating post: {str(e)}", exc_info=True)
         raise HTTPException(status_code=503, detail=f"Error updating post: {str(e)}")
+
+
+@app.get("/user/posts/count")
+def get_user_post_count(current_user: User = Depends(get_current_user)):
+    """
+    Get the total count of posts created by the current user.
+    Returns counts for both community posts and group posts.
+    """
+    try:
+        with Session(engine) as session:
+            # Count community posts
+            community_post_count = session.query(CommunityPost).filter(
+                CommunityPost.user_id == current_user.id
+            ).count()
+            
+            # Count group posts
+            group_post_count = session.query(GroupPost).filter(
+                GroupPost.user_id == current_user.id
+            ).count()
+            
+            return {
+                "community_post_count": community_post_count,
+                "group_post_count": group_post_count,
+                "total_post_count": community_post_count + group_post_count
+            }
+    except Exception as e:
+        logger.error(f"Error fetching user post count: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error fetching post count: {str(e)}")
+
+
+@app.get("/user/posts")
+def get_user_posts(current_user: User = Depends(get_current_user)):
+    """
+    Get all posts created by the current user.
+    Returns both community posts and group posts with like count and comment count.
+    """
+    try:
+        with Session(engine) as session:
+            # Get community posts
+            community_posts = session.query(CommunityPost).filter(
+                CommunityPost.user_id == current_user.id
+            ).order_by(CommunityPost.created_at.desc()).all()
+            
+            # Get group posts
+            group_posts = session.query(GroupPost).filter(
+                GroupPost.user_id == current_user.id
+            ).order_by(GroupPost.created_at.desc()).all()
+            
+            post_list = []
+            
+            # Process community posts
+            for post in community_posts:
+                # Get category info
+                category = session.query(Category).filter(Category.id == post.category_id).first()
+                if not category:
+                    continue
+                
+                # Get comment count
+                comment_count = session.query(CommunityComment).filter(
+                    CommunityComment.post_id == post.id
+                ).count()
+                
+                # Check if current user has liked
+                has_liked = session.query(CommunityPostLike).filter(
+                    CommunityPostLike.post_id == post.id,
+                    CommunityPostLike.user_id == current_user.id
+                ).first() is not None
+                
+                post_list.append({
+                    "id": f"post_{post.id}",
+                    "type": "community",
+                    "title": post.title,
+                    "body": post.body,
+                    "image": post.image,
+                    "tags": json.loads(post.tags) if post.tags else [],
+                    "category": {
+                        "id": f"cat_{category.id:03d}",
+                        "name": category.name
+                    },
+                    "isAnonymous": post.post_type,
+                    "likeCount": post.like_count,
+                    "commentCount": comment_count,
+                    "hasLiked": has_liked,
+                    "postedTime": post.created_at.isoformat()
+                })
+            
+            # Process group posts
+            for post in group_posts:
+                # Get category info
+                category = session.query(Category).filter(Category.id == post.category_id).first()
+                if not category:
+                    continue
+                
+                # Get group info
+                group = session.query(Group).filter(Group.id == post.group_id).first()
+                if not group:
+                    continue
+                
+                # Get comment count
+                comment_count = session.query(GroupComment).filter(
+                    GroupComment.post_id == post.id
+                ).count()
+                
+                # Check if current user has liked
+                has_liked = session.query(GroupPostLike).filter(
+                    GroupPostLike.post_id == post.id,
+                    GroupPostLike.user_id == current_user.id
+                ).first() is not None
+                
+                post_list.append({
+                    "id": f"post_{post.id}",
+                    "type": "group",
+                    "groupId": f"group_{post.group_id}",
+                    "groupName": group.group_name,
+                    "postTitle": post.post_title,
+                    "postBody": post.post_body,
+                    "image": post.image,
+                    "tags": json.loads(post.tags) if post.tags else [],
+                    "category": {
+                        "id": f"cat_{category.id:03d}",
+                        "name": category.name
+                    },
+                    "isAnonymous": post.post_type,
+                    "likeCount": post.like_count,
+                    "commentCount": comment_count,
+                    "hasLiked": has_liked,
+                    "postedTime": post.created_at.isoformat()
+                })
+            
+            # Sort all posts by creation time (newest first)
+            post_list.sort(key=lambda x: x["postedTime"], reverse=True)
+            
+            return {
+                "posts": post_list,
+                "total_count": len(post_list)
+            }
+    except Exception as e:
+        logger.error(f"Error fetching user posts: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error fetching user posts: {str(e)}")
 
 
 @app.delete("/community/delete-post/{post_id}")
