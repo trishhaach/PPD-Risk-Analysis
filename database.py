@@ -136,8 +136,32 @@ def auto_migrate_model_schema():
                 col_def = model_columns[col_name]
                 
                 # Build ALTER TABLE statement
-                # Get column type
-                col_type = str(col_def.type)
+                # Get column type - convert to PostgreSQL compatible types
+                from sqlalchemy import DateTime, Integer, String, Text, Boolean
+                
+                col_type_str = str(col_def.type)
+                # Map SQLAlchemy types to PostgreSQL types
+                if isinstance(col_def.type, DateTime):
+                    col_type = "TIMESTAMP"
+                elif isinstance(col_def.type, Integer):
+                    col_type = "INTEGER"
+                elif isinstance(col_def.type, String):
+                    max_length = getattr(col_def.type, 'length', None)
+                    if max_length:
+                        col_type = f"VARCHAR({max_length})"
+                    else:
+                        col_type = "VARCHAR"
+                elif isinstance(col_def.type, Text):
+                    col_type = "TEXT"
+                elif isinstance(col_def.type, Boolean):
+                    col_type = "BOOLEAN"
+                else:
+                    # Fallback: try to convert DATETIME to TIMESTAMP
+                    if "DATETIME" in col_type_str.upper():
+                        col_type = "TIMESTAMP"
+                    else:
+                        col_type = col_type_str
+                
                 nullable = "NULL" if col_def.nullable else "NOT NULL"
                 default = ""
                 

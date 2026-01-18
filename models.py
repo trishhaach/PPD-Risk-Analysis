@@ -257,3 +257,20 @@ class ContributorPublication(SQLModel, table=True):
     url: str = Field(sa_column=Column(String(1000), nullable=False))
     created_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
     updated_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
+
+
+class Article(SQLModel, table=True):
+    """Model to store articles written by contributors"""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    title: str = Field(sa_column=Column(String(200), nullable=False))
+    preview: str = Field(sa_column=Column(Text, nullable=False))
+    content: str = Field(sa_column=Column(Text, nullable=False))
+    image: str = Field(sa_column=Column(String(500), nullable=False))  # Image URL
+    tags: str = Field(sa_column=Column(Text, nullable=False))  # JSON array as string ["tag1", "tag2"]
+    category_id: int = Field(foreign_key="category.id", nullable=False)
+    user_id: int = Field(foreign_key="user.id", nullable=False)
+    status: str = Field(default="pending", sa_column=Column(String(20), nullable=False))  # "pending" or "published"
+    like_count: int = Field(default=0, sa_column=Column(Integer, nullable=False))
+    published_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime, nullable=True))
+    created_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
+    updated_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))

@@ -478,3 +478,23 @@ class ContributorProfileResponseSchema(BaseModel):
     step4_certifications: List[dict] = []
     step5_expertise_and_publications: Optional[dict] = None
 
+
+# ==================== Article Schemas ====================
+
+class CreateArticleSchema(BaseModel):
+    title: str
+    preview: str
+    content: str
+    image: str
+    tags: List[str]
+    categoryId: str
+
+
+class UpdateArticleSchema(BaseModel):
+    title: Optional[str] = None
+    preview: Optional[str] = None
+    content: Optional[str] = None
+    image: Optional[str] = None
+    tags: Optional[List[str]] = None
+    categoryId: Optional[str] = None
+
