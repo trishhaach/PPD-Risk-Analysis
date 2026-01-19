@@ -23,15 +23,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-# Set up logging first (before Supabase import)
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler()]
-)
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-
 # Supabase imports - handle gracefully if not available
 try:
     from supabase import create_client, Client
@@ -141,27 +132,28 @@ _ppd_ml_predict_url_cache: Optional[str] = None
 PPD_RISK_FORM_CONFIG = {
     "app_title": "PPD Risk Assessment",
     "description": "Enter patient details to screen for Postpartum Depression risk.",
+    "model_file": "catboost_model_top20.cbm",
     "fields": [
         {"id": "Need for Support", "label": "Select Need for Support", "type": "dropdown", "options": ["high", "low", "medium", "none"], "default": "high"},
         {"id": "Recieved Support", "label": "Select Recieved Support", "type": "dropdown", "options": ["high", "low", "medium"], "default": "high"},
         {"id": "Abuse", "label": "Select Abuse", "type": "dropdown", "options": ["no", "yes"], "default": "no"},
-        {"id": "Disease before pregnancy", "label": "Select Disease before pregnancy", "type": "dropdown", "options": ["1.2", "chronic disease", "non-chronic disease", "none"], "default": "1.2"},
-        {"id": "Occupation before latest pregnancy", "label": "Select Occupation before latest pregnancy", "type": "dropdown", "options": ["business", "doctor", "house wife", "housewife", "other", "service", "student", "teacher"], "default": "business"},
+        {"id": "Disease before pregnancy", "label": "Select Disease before pregnancy", "type": "dropdown", "options": ["chronic disease", "non-chronic disease", "none"], "default": "chronic disease"},
         {"id": "Pregnancy plan", "label": "Select Pregnancy plan", "type": "dropdown", "options": ["no", "yes"], "default": "no"},
-        {"id": "Relationship with husband", "label": "Select Relationship with husband", "type": "dropdown", "options": ["bad", "friendly", "good", "neutral", "poor"], "default": "bad"},
-        {"id": "Major changes or losses during pregnancy", "label": "Select Major changes or losses during pregnancy", "type": "dropdown", "options": ["no", "yes"], "default": "no"},
         {"id": "Relationship with the in-laws", "label": "Select Relationship with the in-laws", "type": "dropdown", "options": ["bad", "friendly", "good", "neutral", "poor"], "default": "bad"},
-        {"id": "Birth compliancy", "label": "Select Birth compliancy", "type": "dropdown", "options": ["no", "yes"], "default": "no"},
-        {"id": "Relationship between father and newborn", "label": "Select Relationship between father and newborn", "type": "dropdown", "options": ["bad", "good", "neutral", "very good"], "default": "bad"},
-        {"id": "Education Level", "label": "Select Education Level", "type": "dropdown", "options": ["college", "high school", "primary school", "university", "unknown"], "default": "college"},
+        {"id": "Relationship with husband", "label": "Select Relationship with husband", "type": "dropdown", "options": ["bad", "friendly", "good", "neutral", "poor"], "default": "bad"},
+        {"id": "Occupation before latest pregnancy", "label": "Select Occupation before latest pregnancy", "type": "dropdown", "options": ["business", "doctor", "house wife", "housewife", "other", "service", "student", "teacher"], "default": "business"},
+        {"id": "Major changes or losses during pregnancy", "label": "Select Major changes or losses during pregnancy", "type": "dropdown", "options": ["no", "yes"], "default": "no"},
+        {"id": "Relationship with the newborn", "label": "Select Relationship with the newborn", "type": "dropdown", "options": ["bad", "good", "neutral", "very good"], "default": "bad"},
         {"id": "Family type", "label": "Select Family type", "type": "dropdown", "options": ["joint", "nuclear"], "default": "joint"},
         {"id": "Diseases during pregnancy", "label": "Select Diseases during pregnancy", "type": "dropdown", "options": ["chronic disease", "non-chronic disease", "none"], "default": "chronic disease"},
-        {"id": "Trust and share feelings", "label": "Select Trust and share feelings", "type": "dropdown", "options": ["no", "yes"], "default": "no"},
-        {"id": "Relationship with the newborn", "label": "Select Relationship with the newborn", "type": "dropdown", "options": ["bad", "good", "neutral", "very good"], "default": "bad"},
-        {"id": "Occupation After Your Latest Childbirth", "label": "Select Occupation After Your Latest Childbirth", "type": "dropdown", "options": ["business", "doctor", "house wife", "housewife", "other", "service", "student", "teacher"], "default": "business"},
-        {"id": "Age", "label": "Enter Age", "type": "number", "min": 18.0, "max": 45.0, "default": 18.0},
-        {"id": "Addiction", "label": "Select Addiction", "type": "dropdown", "options": ["Drinking", "Drugs", "Smoking"], "default": "Drinking"},
+        {"id": "Relationship between father and newborn", "label": "Select Relationship between father and newborn", "type": "dropdown", "options": ["bad", "good", "neutral", "very good"], "default": "bad"},
         {"id": "Husband's education level", "label": "Select Husband's education level", "type": "dropdown", "options": ["College", "High School", "High school", "Primary School", "Primary school", "University"], "default": "College"},
+        {"id": "Trust and share feelings", "label": "Select Trust and share feelings", "type": "dropdown", "options": ["no", "yes"], "default": "no"},
+        {"id": "Birth compliancy", "label": "Select Birth compliancy", "type": "dropdown", "options": ["no", "yes"], "default": "no"},
+        {"id": "Education Level", "label": "Select Education Level", "type": "dropdown", "options": ["college", "high school", "primary school", "university", "unknown"], "default": "college"},
+        {"id": "Occupation After Your Latest Childbirth", "label": "Select Occupation After Your Latest Childbirth", "type": "dropdown", "options": ["business", "doctor", "house wife", "housewife", "other", "service", "student", "teacher"], "default": "business"},
+        {"id": "Addiction", "label": "Select Addiction", "type": "dropdown", "options": ["drinking", "drugs", "none", "smoking"], "default": "none"},
+        {"id": "Age", "label": "Enter Age", "type": "number", "min": 18.0, "max": 45.0, "default": 18.0},
     ],
 }
 
