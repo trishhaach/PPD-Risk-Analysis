@@ -39,6 +39,7 @@ from jose import JWTError, jwt
 from sqlmodel import Session
 
 from database import init_db, engine
+from hybrid import HybridScreener
 from models import (
     User,
     EPDSResult,
@@ -73,6 +74,7 @@ from schemas import (
     EPDSAnswerSchema,
     PPDRiskAssessmentRequestSchema,
     PPDRiskAssessmentResponseSchema,
+    HybridScreeningRequestSchema,
     BlogCreateSchema,
     BlogUpdateSchema,
     BlogListItemSchema,
@@ -1007,6 +1009,196 @@ def get_ppd_risk_result(
     except Exception as e:
         logger.error(f"Error fetching PPD risk result: {str(e)}", exc_info=True)
         raise HTTPException(status_code=503, detail=f"Error fetching PPD risk result: {str(e)}")
+
+
+def _extract_ml_probability(ml_result: dict) -> float:
+    """
+    Extract raw probability from ML service response.
+    Tries common field names: 'probability', 'prediction', 'score', 'risk_score', 'prob'
+    """
+    # Try common field names
+    possible_fields = ['probability', 'prediction', 'score', 'risk_score', 'prob', 'risk_probability']
+    
+    for field in possible_fields:
+        if field in ml_result:
+            value = ml_result[field]
+            # Handle nested structures
+            if isinstance(value, dict):
+                # Try to find a numeric value in nested dict
+                for k, v in value.items():
+                    if isinstance(v, (int, float)) and 0 <= v <= 1:
+                        return float(v)
+            elif isinstance(value, (int, float)):
+                # Ensure value is between 0 and 1
+                prob = float(value)
+                if prob < 0 or prob > 1:
+                    # If value is > 1, might be percentage (0-100), convert to 0-1
+                    if prob > 1:
+                        prob = prob / 100.0
+                return prob
+    
+    # If no standard field found, try to find any numeric value between 0-1
+    for key, value in ml_result.items():
+        if isinstance(value, (int, float)):
+            prob = float(value)
+            if 0 <= prob <= 1:
+                return prob
+            elif prob > 1 and prob <= 100:
+                return prob / 100.0
+    
+    raise ValueError(f"Could not extract probability from ML response. Available keys: {list(ml_result.keys())}")
+
+
+@app.post("/screening/hybrid")
+def perform_hybrid_screening(
+    request: HybridScreeningRequestSchema,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    **Perform Hybrid Screening**
+    
+    Combines EPDS (Clinical Authority) and ML-based symptom assessment (Risk Augmentation)
+    using Priority-Based Hierarchy:
+    1. **Critical:** Q10=3 (Immediate Override)
+    2. **High:** EPDS >= 13 (Clinical Dominance)
+    3. **Discordant:** Low EPDS / High ML (Precision-Aware Split Logic)
+    4. **Standard:** Weighted Fusion
+    
+    ⚠️ **DISCLAIMER**: This is a screening aid, NOT a diagnostic tool. 
+    Final decisions require clinical judgment.
+    """
+    try:
+        # Initialize hybrid screener
+        screener = HybridScreener()
+        
+        # Step 1: Get ML raw probability by calling ML service
+        predict_url = _discover_ppd_ml_predict_url()
+        
+        # Extract symptom questionnaire answers from request
+        symptom_payload = {
+            "Need for Support": request.need_for_support,
+            "Recieved Support": request.recieved_support,
+            "Abuse": request.abuse,
+            "Disease before pregnancy": request.disease_before_pregnancy,
+            "Occupation before latest pregnancy": request.occupation_before_latest_pregnancy,
+            "Pregnancy plan": request.pregnancy_plan,
+            "Relationship with husband": request.relationship_with_husband,
+            "Major changes or losses during pregnancy": request.major_changes_or_losses_during_pregnancy,
+            "Relationship with the in-laws": request.relationship_with_in_laws,
+            "Birth compliancy": request.birth_compliancy,
+            "Relationship between father and newborn": request.relationship_between_father_and_newborn,
+            "Education Level": request.education_level,
+            "Family type": request.family_type,
+            "Diseases during pregnancy": request.diseases_during_pregnancy,
+            "Trust and share feelings": request.trust_and_share_feelings,
+            "Relationship with the newborn": request.relationship_with_newborn,
+            "Occupation After Your Latest Childbirth": request.occupation_after_latest_childbirth,
+            "Age": request.age,
+            "Addiction": request.addiction,
+            "Husband's education level": request.husbands_education_level
+        }
+        
+        # Call ML service
+        try:
+            ml_resp = httpx.post(predict_url, json={"data": symptom_payload}, timeout=30)
+            ml_resp.raise_for_status()
+            ml_result = ml_resp.json()
+        except httpx.HTTPStatusError as e:
+            logger.error(f"ML service error: {str(e)}; body={e.response.text}", exc_info=True)
+            raise HTTPException(status_code=503, detail="ML service returned an error")
+        except Exception as e:
+            logger.error(f"Failed calling ML service at {predict_url}: {str(e)}", exc_info=True)
+            raise HTTPException(status_code=503, detail="ML service is unavailable")
+        
+        # Extract ML raw probability
+        try:
+            ml_raw_probability = _extract_ml_probability(ml_result)
+        except ValueError as e:
+            logger.error(f"Error extracting ML probability: {str(e)}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Could not extract probability from ML response: {str(e)}")
+        
+        # Step 2: Perform hybrid screening
+        result = screener.screen(
+            epds_responses=request.epds_responses,
+            ml_raw_probability=ml_raw_probability
+        )
+        
+        # Step 3: Determine clinical recommendation
+        recommendation = "Consult clinical guidelines."
+        if result.risk_label.value == "Critical":
+            recommendation = "IMMEDIATE EMERGENCY INTERVENTION REQUIRED."
+        elif result.risk_label.value == "High":
+            recommendation = "Clinical assessment recommended. Consider referral."
+        elif result.risk_label.value == "Moderate":
+            recommendation = "Enhanced monitoring recommended. Re-screen in 2 weeks."
+        elif result.risk_label.value == "Low":
+            recommendation = "Routine postpartum care."
+        
+        # Step 4: Store both EPDS and PPD risk assessment records for history
+        with Session(engine) as session:
+            # Calculate EPDS-specific risk level for storage
+            epds_total = sum(request.epds_responses)
+            if epds_total < 10:
+                epds_risk_level = "low"
+            elif epds_total < 13:
+                epds_risk_level = "moderate"
+            else:
+                epds_risk_level = "high"
+            
+            # Store EPDS result
+            epds_result = EPDSResult(
+                user_id=current_user.id,
+                q1=request.epds_responses[0],
+                q2=request.epds_responses[1],
+                q3=request.epds_responses[2],
+                q4=request.epds_responses[3],
+                q5=request.epds_responses[4],
+                q6=request.epds_responses[5],
+                q7=request.epds_responses[6],
+                q8=request.epds_responses[7],
+                q9=request.epds_responses[8],
+                q10=request.epds_responses[9],
+                total_score=epds_total,
+                risk_level=epds_risk_level  # Store EPDS-specific risk level
+            )
+            session.add(epds_result)
+            
+            # Store PPD risk assessment
+            ppd_record = PPDRiskAssessment(
+                user_id=current_user.id,
+                ml_endpoint=predict_url,
+                answers_json=json.dumps(symptom_payload),
+                ml_response_json=json.dumps(ml_result),
+            )
+            session.add(ppd_record)
+            session.commit()
+        
+        # Step 5: Return hybrid result
+        from hybrid import RiskLevel
+        return {
+            "risk_label": result.risk_label.value,
+            "final_probability": result.final_probability,
+            "is_critical": (result.risk_label == RiskLevel.CRITICAL),
+            "clinical_recommendation": recommendation,
+            "explanation": result.explanation,
+            "fusion_method": result.fusion_method,
+            "metrics": result.detailed_metrics,
+            "audit": {
+                "timestamp": result.audit_record.timestamp,
+                "decision_path": result.audit_record.decision_path,
+                "is_discordant": result.audit_record.is_discordant,
+                "uncertainty_flag": result.audit_record.uncertainty_flag
+            },
+            "system_disclaimer": "Screening aid only. Consult clinical guidelines."
+        }
+        
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error in hybrid screening: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error performing hybrid screening: {str(e)}")
 
 
 # ==================== BLOG API ENDPOINTS ====================
@@ -3864,11 +4056,16 @@ def get_contributor_article_list(current_user: User = Depends(get_current_user))
                     "id": f"article_{article.id}",
                     "title": article.title,
                     "preview": article.preview,
+                    "content": article.content,
                     "image": article.image,
                     "tags": json.loads(article.tags) if article.tags else [],
                     "category": {
                         "id": f"cat_{category.id:03d}" if category else None,
                         "name": category.name if category else None
+                    },
+                    "contributor": {
+                        "id": current_user.id,
+                        "name": current_user.name
                     },
                     "status": article.status,
                     "like_count": article.like_count,
@@ -3880,6 +4077,49 @@ def get_contributor_article_list(current_user: User = Depends(get_current_user))
     except Exception as e:
         logger.error(f"Error fetching article list: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error fetching article list: {str(e)}")
+
+
+@app.get("/contributor/article/published")
+def get_contributor_published_articles(current_user: User = Depends(get_current_user)):
+    """
+    Get only published articles for the current contributor.
+    Includes content, contributor info, and like_count for each article.
+    """
+    try:
+        with Session(engine) as session:
+            articles = session.query(Article).filter(
+                Article.user_id == current_user.id,
+                Article.status == "published"
+            ).order_by(Article.created_at.desc()).all()
+            
+            article_list = []
+            for article in articles:
+                category = session.query(Category).filter(Category.id == article.category_id).first()
+                article_list.append({
+                    "id": f"article_{article.id}",
+                    "title": article.title,
+                    "preview": article.preview,
+                    "content": article.content,
+                    "image": article.image,
+                    "tags": json.loads(article.tags) if article.tags else [],
+                    "category": {
+                        "id": f"cat_{category.id:03d}" if category else None,
+                        "name": category.name if category else None
+                    },
+                    "contributor": {
+                        "id": current_user.id,
+                        "name": current_user.name
+                    },
+                    "status": article.status,
+                    "like_count": article.like_count,
+                    "createdAt": article.created_at.isoformat(),
+                    "publishedAt": article.published_at.isoformat() if article.published_at else None
+                })
+            
+            return article_list
+    except Exception as e:
+        logger.error(f"Error fetching published articles: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error fetching published articles: {str(e)}")
 
 
 # ==================== Admin Article APIs ====================

@@ -128,6 +128,74 @@ class PPDRiskAssessmentResponseSchema(BaseModel):
     createdAt: str
 
 
+class HybridScreeningRequestSchema(BaseModel):
+    """
+    Request schema for hybrid screening that combines EPDS and symptom-based ML assessment.
+    """
+    # EPDS responses (10 questions, each 0-3)
+    epds_responses: List[int] = Field(..., min_length=10, max_length=10, description="List of 10 EPDS responses (integers 0-3)")
+    
+    # Symptom questionnaire answers (same as PPDRiskAssessmentRequestSchema)
+    need_for_support: str = Field(alias="Need for Support")
+    recieved_support: str = Field(alias="Recieved Support")
+    abuse: str = Field(alias="Abuse")
+    disease_before_pregnancy: str = Field(alias="Disease before pregnancy")
+    occupation_before_latest_pregnancy: str = Field(alias="Occupation before latest pregnancy")
+    pregnancy_plan: str = Field(alias="Pregnancy plan")
+    relationship_with_husband: str = Field(alias="Relationship with husband")
+    major_changes_or_losses_during_pregnancy: str = Field(alias="Major changes or losses during pregnancy")
+    relationship_with_in_laws: str = Field(alias="Relationship with the in-laws")
+    birth_compliancy: str = Field(alias="Birth compliancy")
+    relationship_between_father_and_newborn: str = Field(alias="Relationship between father and newborn")
+    education_level: str = Field(alias="Education Level")
+    family_type: str = Field(alias="Family type")
+    diseases_during_pregnancy: str = Field(alias="Diseases during pregnancy")
+    trust_and_share_feelings: str = Field(alias="Trust and share feelings")
+    relationship_with_newborn: str = Field(alias="Relationship with the newborn")
+    occupation_after_latest_childbirth: str = Field(alias="Occupation After Your Latest Childbirth")
+    age: float = Field(alias="Age", ge=18.0, le=45.0)
+    addiction: str = Field(alias="Addiction")
+    husbands_education_level: str = Field(alias="Husband's education level")
+    
+    model_config = ConfigDict(populate_by_name=True)
+    
+    @field_validator('epds_responses')
+    @classmethod
+    def validate_epds_responses(cls, v):
+        if len(v) != 10:
+            raise ValueError("EPDS must have exactly 10 responses")
+        if any(score < 0 or score > 3 for score in v):
+            raise ValueError("Each EPDS response must be between 0 and 3")
+        return v
+    
+    @field_validator(
+        "need_for_support",
+        "recieved_support",
+        "abuse",
+        "disease_before_pregnancy",
+        "occupation_before_latest_pregnancy",
+        "pregnancy_plan",
+        "relationship_with_husband",
+        "major_changes_or_losses_during_pregnancy",
+        "relationship_with_in_laws",
+        "birth_compliancy",
+        "relationship_between_father_and_newborn",
+        "education_level",
+        "family_type",
+        "diseases_during_pregnancy",
+        "trust_and_share_feelings",
+        "relationship_with_newborn",
+        "occupation_after_latest_childbirth",
+        "addiction",
+        "husbands_education_level"
+    )
+    @classmethod
+    def validate_non_empty(cls, v):
+        if v is None or (isinstance(v, str) and len(v.strip()) == 0):
+            raise ValueError("Field cannot be empty")
+        return v
+
+
 
 # Blog Schemas
 class TOCObject(BaseModel):
