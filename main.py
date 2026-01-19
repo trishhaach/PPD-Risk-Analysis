@@ -3354,6 +3354,50 @@ def create_step1_basic_profile(
         raise HTTPException(status_code=500, detail=f"Error creating profile: {str(e)}")
 
 
+@app.patch("/contributor/profile/step1-basic-profile")
+def update_step1_basic_profile(
+    data: Step1BasicProfileSchema,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Step 1: Update basic profile information.
+    All fields are required. Returns 404 if profile doesn't exist yet.
+    """
+    try:
+        with Session(engine) as session:
+            profile = session.query(ContributorProfile).filter(
+                ContributorProfile.user_id == current_user.id
+            ).first()
+
+            if not profile:
+                raise HTTPException(status_code=404, detail="Profile not found. Please complete step 1 first.")
+
+            profile.first_name = data.first_name
+            profile.last_name = data.last_name
+            profile.professional_title = data.professional_title
+            profile.short_bio = data.short_bio
+            profile.updated_at = datetime.utcnow()
+
+            session.add(profile)
+            session.commit()
+            session.refresh(profile)
+
+            return {
+                "message": "Step 1 profile updated successfully",
+                "step1_basic_profile": {
+                    "first_name": profile.first_name,
+                    "last_name": profile.last_name,
+                    "professional_title": profile.professional_title,
+                    "short_bio": profile.short_bio
+                }
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating step 1 profile: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error updating profile: {str(e)}")
+
+
 @app.post("/contributor/profile/step2-education")
 def create_step2_education(
     data: Step2EducationSchema,
@@ -3412,6 +3456,58 @@ def create_step2_education(
     except Exception as e:
         logger.error(f"Error creating step 2 education: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error creating education: {str(e)}")
+
+
+@app.patch("/contributor/profile/step2-education")
+def update_step2_education(
+    data: Step2EducationSchema,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Step 2: Update education entries (replace-all).
+    All fields are required. Replaces the user's entire education list.
+    """
+    try:
+        incoming_ids = [e.education_id for e in data.education]
+        if len(incoming_ids) != len(set(incoming_ids)):
+            raise HTTPException(status_code=400, detail="Duplicate education_id found in request body.")
+
+        with Session(engine) as session:
+            # Replace-all behavior: delete existing, then insert incoming list
+            session.query(ContributorEducation).filter(
+                ContributorEducation.user_id == current_user.id
+            ).delete(synchronize_session=False)
+
+            created_educations = []
+            for edu in data.education:
+                new_education = ContributorEducation(
+                    user_id=current_user.id,
+                    education_id=edu.education_id,
+                    institution_name=edu.institution_name,
+                    degree=edu.degree,
+                    year_of_graduation=edu.year_of_graduation,
+                    field_of_study=edu.field_of_study
+                )
+                session.add(new_education)
+                created_educations.append({
+                    "education_id": edu.education_id,
+                    "institution_name": edu.institution_name,
+                    "degree": edu.degree,
+                    "year_of_graduation": edu.year_of_graduation,
+                    "field_of_study": edu.field_of_study
+                })
+
+            session.commit()
+
+            return {
+                "message": "Step 2 education updated successfully",
+                "step2_education": created_educations
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating step 2 education: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error updating education: {str(e)}")
 
 
 @app.post("/contributor/profile/step3-experience")
@@ -3480,6 +3576,65 @@ def create_step3_experience(
     except Exception as e:
         logger.error(f"Error creating step 3 experience: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error creating experience: {str(e)}")
+
+
+@app.patch("/contributor/profile/step3-experience")
+def update_step3_experience(
+    data: Step3ExperienceSchema,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Step 3: Update work experience entries (replace-all).
+    All fields are required. Replaces the user's entire experience list.
+    """
+    try:
+        incoming_ids = [e.experience_id for e in data.experience]
+        if len(incoming_ids) != len(set(incoming_ids)):
+            raise HTTPException(status_code=400, detail="Duplicate experience_id found in request body.")
+
+        with Session(engine) as session:
+            session.query(ContributorExperience).filter(
+                ContributorExperience.user_id == current_user.id
+            ).delete(synchronize_session=False)
+
+            created_experiences = []
+            for exp in data.experience:
+                new_experience = ContributorExperience(
+                    user_id=current_user.id,
+                    experience_id=exp.experience_id,
+                    job_title=exp.job_title,
+                    company_name=exp.company_name,
+                    start_month=exp.start_month,
+                    start_year=exp.start_year,
+                    end_month=exp.end_month,
+                    end_year=exp.end_year,
+                    is_currently_working=exp.is_currently_working,
+                    key_responsibilities=exp.key_responsibilities
+                )
+                session.add(new_experience)
+                created_experiences.append({
+                    "experience_id": exp.experience_id,
+                    "job_title": exp.job_title,
+                    "company_name": exp.company_name,
+                    "start_month": exp.start_month,
+                    "start_year": exp.start_year,
+                    "end_month": exp.end_month,
+                    "end_year": exp.end_year,
+                    "is_currently_working": exp.is_currently_working,
+                    "key_responsibilities": exp.key_responsibilities
+                })
+
+            session.commit()
+
+            return {
+                "message": "Step 3 experience updated successfully",
+                "step3_experience": created_experiences
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating step 3 experience: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error updating experience: {str(e)}")
 
 
 @app.post("/contributor/profile/step4-certifications")
@@ -3562,6 +3717,77 @@ def create_step4_certifications(
         raise HTTPException(status_code=500, detail=f"Error creating certifications: {str(e)}")
 
 
+@app.patch("/contributor/profile/step4-certifications")
+def update_step4_certifications(
+    data: Step4CertificationsSchema,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Step 4: Update certification entries (replace-all).
+    All fields are required (except expiration_date and credential_id which can be null).
+    Replaces the user's entire certifications list.
+    """
+    try:
+        incoming_ids = [c.certification_id for c in data.certifications]
+        if len(incoming_ids) != len(set(incoming_ids)):
+            raise HTTPException(status_code=400, detail="Duplicate certification_id found in request body.")
+
+        with Session(engine) as session:
+            session.query(ContributorCertification).filter(
+                ContributorCertification.user_id == current_user.id
+            ).delete(synchronize_session=False)
+
+            created_certifications = []
+            for cert in data.certifications:
+                # Parse date_issued (handle various ISO formats)
+                date_issued_str = cert.date_issued
+                if date_issued_str.endswith('Z'):
+                    date_issued_str = date_issued_str.replace('Z', '+00:00')
+                elif '+' not in date_issued_str and 'T' in date_issued_str:
+                    date_issued_str = date_issued_str + '+00:00'
+                date_issued = datetime.fromisoformat(date_issued_str)
+
+                expiration_date = None
+                if cert.expiration_date:
+                    exp_date_str = cert.expiration_date
+                    if exp_date_str.endswith('Z'):
+                        exp_date_str = exp_date_str.replace('Z', '+00:00')
+                    elif '+' not in exp_date_str and 'T' in exp_date_str:
+                        exp_date_str = exp_date_str + '+00:00'
+                    expiration_date = datetime.fromisoformat(exp_date_str)
+
+                new_certification = ContributorCertification(
+                    user_id=current_user.id,
+                    certification_id=cert.certification_id,
+                    certification_name=cert.certification_name,
+                    issuing_organization=cert.issuing_organization,
+                    date_issued=date_issued,
+                    expiration_date=expiration_date,
+                    credential_id=cert.credential_id
+                )
+                session.add(new_certification)
+                created_certifications.append({
+                    "certification_id": cert.certification_id,
+                    "certification_name": cert.certification_name,
+                    "issuing_organization": cert.issuing_organization,
+                    "date_issued": cert.date_issued,
+                    "expiration_date": cert.expiration_date,
+                    "credential_id": cert.credential_id
+                })
+
+            session.commit()
+
+            return {
+                "message": "Step 4 certifications updated successfully",
+                "step4_certifications": created_certifications
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating step 4 certifications: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error updating certifications: {str(e)}")
+
+
 @app.post("/contributor/profile/step5-expertise-and-publications")
 def create_step5_expertise_and_publications(
     data: Step5ExpertiseAndPublicationsSchema,
@@ -3628,6 +3854,62 @@ def create_step5_expertise_and_publications(
     except Exception as e:
         logger.error(f"Error creating step 5 expertise and publications: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error creating expertise and publications: {str(e)}")
+
+
+@app.patch("/contributor/profile/step5-expertise-and-publications")
+def update_step5_expertise_and_publications(
+    data: Step5ExpertiseAndPublicationsSchema,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Step 5: Update expertise topics and publications (replace-all).
+    Expertise topics can contain duplicates. Publications require unique publication_id values.
+    """
+    try:
+        incoming_pub_ids = [p.publication_id for p in data.publications]
+        if len(incoming_pub_ids) != len(set(incoming_pub_ids)):
+            raise HTTPException(status_code=400, detail="Duplicate publication_id found in request body.")
+
+        with Session(engine) as session:
+            # Replace-all: remove existing topics + publications, then insert incoming
+            session.query(ContributorExpertise).filter(
+                ContributorExpertise.user_id == current_user.id
+            ).delete(synchronize_session=False)
+            session.query(ContributorPublication).filter(
+                ContributorPublication.user_id == current_user.id
+            ).delete(synchronize_session=False)
+
+            for topic in data.expertise_topics:
+                session.add(ContributorExpertise(user_id=current_user.id, topic=topic))
+
+            created_publications = []
+            for pub in data.publications:
+                session.add(ContributorPublication(
+                    user_id=current_user.id,
+                    publication_id=pub.publication_id,
+                    title=pub.title,
+                    url=pub.url
+                ))
+                created_publications.append({
+                    "publication_id": pub.publication_id,
+                    "title": pub.title,
+                    "url": pub.url
+                })
+
+            session.commit()
+
+            return {
+                "message": "Step 5 expertise and publications updated successfully",
+                "step5_expertise_and_publications": {
+                    "expertise_topics": data.expertise_topics,
+                    "publications": created_publications
+                }
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating step 5 expertise and publications: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error updating expertise and publications: {str(e)}")
 
 
 @app.get("/contributor/profile", response_model=ContributorProfileResponseSchema)
