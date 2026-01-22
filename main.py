@@ -819,11 +819,100 @@ def get_epds_history(current_user: User = Depends(get_current_user)):
         raise HTTPException(status_code=503, detail=f"Error fetching screening history: {str(e)}")
 
 
+@app.get("/hybrid-screen/history")
+def get_hybrid_screening_history(current_user: User = Depends(get_current_user)):
+    """
+    Get the user's hybrid screening history.
+    Returns hybrid screening results that combine EPDS and ML-based symptom assessment.
+    """
+    try:
+        from sqlalchemy import func, and_
+        screener = HybridScreener()
+        
+        with Session(engine) as session:
+            # Get all EPDS results for the user, ordered by most recent
+            epds_results = session.query(EPDSResult).filter(
+                EPDSResult.user_id == current_user.id
+            ).order_by(EPDSResult.created_at.desc()).all()
+            
+            history = []
+            
+            for epds in epds_results:
+                # Find matching PPD risk assessment within 5 seconds
+                matching_ppd = session.query(PPDRiskAssessment).filter(
+                    PPDRiskAssessment.user_id == current_user.id,
+                    func.abs(
+                        func.extract('epoch', epds.created_at - PPDRiskAssessment.created_at)
+                    ) <= 5
+                ).first()
+                
+                if matching_ppd:
+                    try:
+                        # Extract ML probability from stored PPD response
+                        ml_result = json.loads(matching_ppd.ml_response_json)
+                        ml_raw_probability = _extract_ml_probability(ml_result)
+                        
+                        # Reconstruct EPDS responses
+                        epds_responses = [
+                            epds.q1, epds.q2, epds.q3, epds.q4, epds.q5,
+                            epds.q6, epds.q7, epds.q8, epds.q9, epds.q10
+                        ]
+                        
+                        # Re-run hybrid screening to get the result
+                        result = screener.screen(
+                            epds_responses=epds_responses,
+                            ml_raw_probability=ml_raw_probability
+                        )
+                        
+                        # Determine clinical recommendation
+                        recommendation = "Consult clinical guidelines."
+                        if result.risk_label.value == "Critical":
+                            recommendation = "IMMEDIATE EMERGENCY INTERVENTION REQUIRED."
+                        elif result.risk_label.value == "High":
+                            recommendation = "Clinical assessment recommended. Consider referral."
+                        elif result.risk_label.value == "Moderate":
+                            recommendation = "Enhanced monitoring recommended. Re-screen in 2 weeks."
+                        elif result.risk_label.value == "Low":
+                            recommendation = "Routine postpartum care."
+                        
+                        history.append({
+                            "id": epds.id,
+                            "risk_label": result.risk_label.value,
+                            "final_probability": result.final_probability,
+                            "is_critical": (result.risk_label.value == "Critical"),
+                            "clinical_recommendation": recommendation,
+                            "epds_total_score": epds.total_score,
+                            "epds_risk_level": epds.risk_level,
+                            "fusion_method": result.fusion_method,
+                            "explanation": result.explanation,
+                            "metrics": result.detailed_metrics,
+                            "audit": {
+                                "timestamp": result.audit_record.timestamp,
+                                "decision_path": result.audit_record.decision_path,
+                                "is_discordant": result.audit_record.is_discordant,
+                                "uncertainty_flag": result.audit_record.uncertainty_flag
+                            },
+                            "created_at": epds.created_at.isoformat()
+                        })
+                    except (ValueError, KeyError, json.JSONDecodeError) as e:
+                        # Skip this entry if we can't process it
+                        logger.warning(f"Could not process hybrid screening {epds.id}: {str(e)}")
+                        continue
+            
+            return {
+                "history": history,
+                "count": len(history)
+            }
+    except Exception as e:
+        logger.error(f"Error fetching hybrid screening history: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error fetching hybrid screening history: {str(e)}")
+
+
 @app.get("/screening/count")
 def get_screening_counts(current_user: User = Depends(get_current_user)):
     """
     Get the total count of screenings done by the user.
-    Returns counts for both EPDS and PPD risk assessments.
+    Returns counts for EPDS, PPD risk assessments, and hybrid screenings.
     """
     try:
         with Session(engine) as session:
@@ -837,9 +926,30 @@ def get_screening_counts(current_user: User = Depends(get_current_user)):
                 PPDRiskAssessment.user_id == current_user.id
             ).count()
             
+            # Count hybrid screenings: EPDSResult records that have a corresponding PPDRiskAssessment
+            # created within 5 seconds (hybrid screenings create both in the same transaction)
+            from sqlalchemy import func, and_
+            # Get all EPDS results for the user
+            epds_results = session.query(EPDSResult).filter(
+                EPDSResult.user_id == current_user.id
+            ).all()
+            
+            # Count how many have a matching PPDRiskAssessment within 5 seconds
+            hybrid_count = 0
+            for epds in epds_results:
+                matching_ppd = session.query(PPDRiskAssessment).filter(
+                    PPDRiskAssessment.user_id == current_user.id,
+                    func.abs(
+                        func.extract('epoch', epds.created_at - PPDRiskAssessment.created_at)
+                    ) <= 5
+                ).first()
+                if matching_ppd:
+                    hybrid_count += 1
+            
             return {
                 "epds_screening_count": epds_count,
                 "ppd_risk_assessment_count": ppd_count,
+                "hybrid_screening_count": hybrid_count,
                 "total_screening_count": epds_count + ppd_count
             }
     except Exception as e:
