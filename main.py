@@ -118,7 +118,7 @@ load_dotenv()
 # These can be set via .env file locally or environment variables in deployment
 SECRET_KEY = os.getenv("SAKHI_SECRET_KEY", "dev-secret-change-me")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60
+ACCESS_TOKEN_EXPIRE_MINUTES = 600  # 10 hours
 PASSWORD_SALT = os.getenv("SAKHI_PASSWORD_SALT", "dev-salt-change-me")
 
 # ==================== ML (PPD Risk Assessment) Configuration ====================
