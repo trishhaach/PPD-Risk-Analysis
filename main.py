@@ -915,27 +915,23 @@ def get_screening_counts(current_user: User = Depends(get_current_user)):
     Returns counts for EPDS, PPD risk assessments, and hybrid screenings.
     """
     try:
+        from sqlalchemy import func
         with Session(engine) as session:
-            # Count EPDS screenings
-            epds_count = session.query(EPDSResult).filter(
-                EPDSResult.user_id == current_user.id
-            ).count()
-            
-            # Count PPD risk assessments
-            ppd_count = session.query(PPDRiskAssessment).filter(
-                PPDRiskAssessment.user_id == current_user.id
-            ).count()
-            
-            # Count hybrid screenings: EPDSResult records that have a corresponding PPDRiskAssessment
-            # created within 5 seconds (hybrid screenings create both in the same transaction)
-            from sqlalchemy import func, and_
             # Get all EPDS results for the user
             epds_results = session.query(EPDSResult).filter(
                 EPDSResult.user_id == current_user.id
             ).all()
             
-            # Count how many have a matching PPDRiskAssessment within 5 seconds
+            # Get all PPD risk assessments for the user
+            ppd_results = session.query(PPDRiskAssessment).filter(
+                PPDRiskAssessment.user_id == current_user.id
+            ).all()
+            
+            # Identify hybrid screenings: EPDS with matching PPD within 5 seconds
+            hybrid_epds_ids = set()
+            hybrid_ppd_ids = set()
             hybrid_count = 0
+            
             for epds in epds_results:
                 matching_ppd = session.query(PPDRiskAssessment).filter(
                     PPDRiskAssessment.user_id == current_user.id,
@@ -944,13 +940,21 @@ def get_screening_counts(current_user: User = Depends(get_current_user)):
                     ) <= 5
                 ).first()
                 if matching_ppd:
+                    hybrid_epds_ids.add(epds.id)
+                    hybrid_ppd_ids.add(matching_ppd.id)
                     hybrid_count += 1
             
+            # Count standalone EPDS (EPDS that are NOT part of hybrid screening)
+            standalone_epds_count = len(epds_results) - len(hybrid_epds_ids)
+            
+            # Count standalone PPD (PPD that are NOT part of hybrid screening)
+            standalone_ppd_count = len(ppd_results) - len(hybrid_ppd_ids)
+            
             return {
-                "epds_screening_count": epds_count,
-                "ppd_risk_assessment_count": ppd_count,
+                "epds_screening_count": standalone_epds_count,
+                "ppd_risk_assessment_count": standalone_ppd_count,
                 "hybrid_screening_count": hybrid_count,
-                "total_screening_count": epds_count + ppd_count
+                "total_screening_count": standalone_epds_count + standalone_ppd_count + hybrid_count
             }
     except Exception as e:
         logger.error(f"Error fetching screening counts: {str(e)}", exc_info=True)
