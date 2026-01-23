@@ -1001,6 +1001,121 @@ def get_epds_result(result_id: int, current_user: User = Depends(get_current_use
         raise HTTPException(status_code=503, detail=f"Error fetching screening result: {str(e)}")
 
 
+@app.get("/screening/hybrid/{result_id}")
+def get_hybrid_result(result_id: int, current_user: User = Depends(get_current_user)):
+    """
+    Get a specific hybrid screening result by EPDS result ID.
+    Reconstructs the hybrid result from stored EPDS and PPD risk assessment records.
+    """
+    try:
+        from sqlalchemy import func
+        with Session(engine) as session:
+            # Get EPDS result
+            epds_result = session.query(EPDSResult).filter(
+                EPDSResult.id == result_id,
+                EPDSResult.user_id == current_user.id
+            ).first()
+            
+            if not epds_result:
+                raise HTTPException(status_code=404, detail="EPDS screening result not found")
+            
+            # Find matching PPD risk assessment (created within 5 seconds)
+            matching_ppd = session.query(PPDRiskAssessment).filter(
+                PPDRiskAssessment.user_id == current_user.id,
+                func.abs(
+                    func.extract('epoch', epds_result.created_at - PPDRiskAssessment.created_at)
+                ) <= 5
+            ).first()
+            
+            if not matching_ppd:
+                raise HTTPException(status_code=404, detail="Hybrid screening result not found. This EPDS result does not have a matching PPD risk assessment.")
+            
+            # Extract ML probability from stored PPD result
+            try:
+                ml_response = json.loads(matching_ppd.ml_response_json)
+                ml_raw_probability = _extract_ml_probability(ml_response)
+            except (json.JSONDecodeError, ValueError) as e:
+                logger.error(f"Error extracting ML probability from stored result: {str(e)}", exc_info=True)
+                raise HTTPException(status_code=500, detail=f"Could not extract probability from stored ML response: {str(e)}")
+            
+            # Reconstruct EPDS responses
+            epds_responses = [
+                epds_result.q1,
+                epds_result.q2,
+                epds_result.q3,
+                epds_result.q4,
+                epds_result.q5,
+                epds_result.q6,
+                epds_result.q7,
+                epds_result.q8,
+                epds_result.q9,
+                epds_result.q10,
+            ]
+            
+            # Run hybrid screener to reconstruct result
+            screener = HybridScreener()
+            result = screener.screen(
+                epds_responses=epds_responses,
+                ml_raw_probability=ml_raw_probability
+            )
+            
+            # Determine clinical recommendation
+            recommendation = "Consult clinical guidelines."
+            if result.risk_label.value == "Critical":
+                recommendation = "IMMEDIATE EMERGENCY INTERVENTION REQUIRED."
+            elif result.risk_label.value == "High":
+                recommendation = "Clinical assessment recommended. Consider referral."
+            elif result.risk_label.value == "Moderate":
+                recommendation = "Enhanced monitoring recommended. Re-screen in 2 weeks."
+            elif result.risk_label.value == "Low":
+                recommendation = "Routine postpartum care."
+            
+            from hybrid import RiskLevel
+            return {
+                "id": result_id,
+                "risk_label": result.risk_label.value,
+                "final_probability": result.final_probability,
+                "is_critical": (result.risk_label == RiskLevel.CRITICAL),
+                "clinical_recommendation": recommendation,
+                "explanation": result.explanation,
+                "fusion_method": result.fusion_method,
+                "metrics": result.detailed_metrics,
+                "audit": {
+                    "timestamp": result.audit_record.timestamp,
+                    "decision_path": result.audit_record.decision_path,
+                    "is_discordant": result.audit_record.is_discordant,
+                    "uncertainty_flag": result.audit_record.uncertainty_flag
+                },
+                "epds_data": {
+                    "total_score": epds_result.total_score,
+                    "risk_level": epds_result.risk_level,
+                    "answers": {
+                        "q1": epds_result.q1,
+                        "q2": epds_result.q2,
+                        "q3": epds_result.q3,
+                        "q4": epds_result.q4,
+                        "q5": epds_result.q5,
+                        "q6": epds_result.q6,
+                        "q7": epds_result.q7,
+                        "q8": epds_result.q8,
+                        "q9": epds_result.q9,
+                        "q10": epds_result.q10,
+                    }
+                },
+                "ppd_data": {
+                    "ml_probability": ml_raw_probability,
+                    "ml_response": ml_response
+                },
+                "created_at": epds_result.created_at.isoformat(),
+                "system_disclaimer": "Screening aid only. Consult clinical guidelines."
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching hybrid screening result: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Error fetching hybrid screening result: {str(e)}")
+
+
 # ==================== ML-based PPD Risk (Symptom Questionnaire) ====================
 
 @app.get("/symptom/ppd-risk/form")
@@ -1812,12 +1927,14 @@ def view_posts(current_user: User = Depends(get_current_user)):
                 if post.post_type:  # True means anonymous
                     user_info = {
                         "id": "anonymous",
-                        "name": "Anonymous"
+                        "name": "Anonymous",
+                        "userId": f"user_{user.id}"
                     }
                 else:  # False means not anonymous
                     user_info = {
                         "id": f"user_{user.id}",
-                        "name": user.name
+                        "name": user.name,
+                        "userId": f"user_{user.id}"
                     }
                 
                 post_list.append({
