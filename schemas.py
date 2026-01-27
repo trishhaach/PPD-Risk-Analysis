@@ -566,3 +566,86 @@ class UpdateArticleSchema(BaseModel):
     tags: Optional[List[str]] = None
     categoryId: Optional[str] = None
 
+
+# ==================== Partner Invitation Schemas ====================
+
+class CreatePartnerInviteSchema(BaseModel):
+    partner_email: EmailStr
+    access_level: str = Field(default="latest_summary", description="'latest_summary' or 'full_history'")
+    screening_types: List[str] = Field(
+        default=["epds", "ppd", "hybrid"],
+        description="List of screening types to share: 'epds', 'ppd', 'hybrid'"
+    )
+    
+    @field_validator("access_level")
+    @classmethod
+    def validate_access_level(cls, v):
+        if v not in ["latest_summary", "full_history"]:
+            raise ValueError("access_level must be 'latest_summary' or 'full_history'")
+        return v
+    
+    @field_validator("screening_types")
+    @classmethod
+    def validate_screening_types(cls, v):
+        valid_types = ["epds", "ppd", "hybrid"]
+        if not v or len(v) == 0:
+            raise ValueError("At least one screening type must be specified")
+        for st in v:
+            if st not in valid_types:
+                raise ValueError(f"Invalid screening type: {st}. Must be one of: {valid_types}")
+        return v
+
+
+class AcceptInviteSchema(BaseModel):
+    invite_code: str = Field(..., min_length=6, max_length=10, description="Invite code received via email")
+
+
+class PartnerInviteResponseSchema(BaseModel):
+    invite_code: str
+    partner_email: str
+    expires_at: str
+    created_at: str
+
+
+class MotherPartnerLinkResponseSchema(BaseModel):
+    link_id: str
+    partner_id: str
+    partner_name: str
+    partner_email: str
+    status: str
+    permissions: dict
+    created_at: str
+    revoked_at: Optional[str] = None
+
+
+class PartnerLinkedMotherSchema(BaseModel):
+    link_id: str
+    mother_id: str
+    mother_name: str
+    mother_email: str
+    status: str
+    permissions: dict
+    created_at: str
+
+
+class ScreeningSummarySchema(BaseModel):
+    total_screenings: int
+    epds_count: int
+    ppd_count: int
+    hybrid_count: int
+    latest_epds: Optional[dict] = None
+    latest_ppd: Optional[dict] = None
+    latest_hybrid: Optional[dict] = None
+
+
+class ScreeningHistoryItemSchema(BaseModel):
+    id: str
+    type: str  # "epds", "ppd", "hybrid"
+    result: dict
+    created_at: str
+
+
+class ScreeningHistoryResponseSchema(BaseModel):
+    total: int
+    items: List[ScreeningHistoryItemSchema]
+

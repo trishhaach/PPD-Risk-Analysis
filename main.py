@@ -11,7 +11,7 @@ import smtplib
 from email.message import EmailMessage
 import json
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, BackgroundTasks, Query, File, UploadFile
+from fastapi import Depends, FastAPI, HTTPException, BackgroundTasks, Query, File, UploadFile, Request
 from fastapi.responses import JSONResponse
 
 # Set up logging first (before Supabase import)
@@ -63,6 +63,9 @@ from models import (
     ContributorExpertise,
     ContributorPublication,
     Article,
+    PartnerInvite,
+    MotherPartnerLink,
+    PartnerAccessAudit,
 )
 from schemas import (
     SignupSchema,
@@ -104,6 +107,14 @@ from schemas import (
     ContributorProfileResponseSchema,
     CreateArticleSchema,
     UpdateArticleSchema,
+    CreatePartnerInviteSchema,
+    AcceptInviteSchema,
+    PartnerInviteResponseSchema,
+    MotherPartnerLinkResponseSchema,
+    PartnerLinkedMotherSchema,
+    ScreeningSummarySchema,
+    ScreeningHistoryItemSchema,
+    ScreeningHistoryResponseSchema,
 )
 
 # Logging is already set up above (before Supabase import)
@@ -406,6 +417,198 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
             raise credentials_exception
         logger.info(f"User authenticated successfully: {user.email}")
         return user
+
+
+# ==================== Partner Invitation Helper Functions ====================
+
+def generate_invite_code() -> str:
+    """Generate a short, random invite code (8 characters, alphanumeric)"""
+    import secrets
+    import string
+    alphabet = string.ascii_uppercase + string.digits
+    # Exclude confusing characters: 0, O, I, 1
+    alphabet = alphabet.replace('0', '').replace('O', '').replace('I', '').replace('1', '')
+    return ''.join(secrets.choice(alphabet) for _ in range(8))
+
+
+def send_partner_invite_email(to_email: str, invite_code: str, mother_name: str) -> None:
+    """Send partner invitation email with invite code"""
+    if not SAKHI_EMAIL_ADDRESS or not SAKHI_EMAIL_PASSWORD:
+        logger.warning(f"Email credentials not set, skipping invite email to {to_email}")
+        return
+
+    msg = EmailMessage()
+    msg["From"] = SAKHI_EMAIL_ADDRESS
+    msg["To"] = to_email
+    msg["Subject"] = f"Invitation to View {mother_name}'s Screening Data"
+
+    msg.set_content(
+        f"Hi,\n\n"
+        f"{mother_name} has invited you to view their postpartum depression screening data.\n\n"
+        f"Your invitation code is: {invite_code}\n\n"
+        f"This code will expire in 24 hours.\n\n"
+        f"To accept this invitation:\n"
+        f"1. Sign up or log in to Sakhi as a partner\n"
+        f"2. Enter the invitation code: {invite_code}\n\n"
+        f"If you did not expect this invitation, you can safely ignore this email.\n\n"
+        f"With care,\n"
+        f"The Sakhi Team"
+    )
+
+    try:
+        logger.info(f"Sending partner invite email to: {to_email}")
+        with smtplib.SMTP("smtp.gmail.com", 587) as server:
+            server.starttls()
+            server.login(SAKHI_EMAIL_ADDRESS, SAKHI_EMAIL_PASSWORD)
+            server.send_message(msg)
+        logger.info(f"Partner invite email sent successfully to: {to_email}")
+    except Exception as e:
+        logger.error(f"ERROR sending partner invite email to {to_email}: {str(e)}", exc_info=True)
+
+
+# Rate limiting for invite code acceptance (simple in-memory store)
+_invite_code_attempts: dict = {}  # {user_id_or_ip: {count: int, lockout_until: datetime}}
+
+
+def check_rate_limit(user_id: Optional[int] = None, ip_address: Optional[str] = None) -> bool:
+    """
+    Check if user/IP has exceeded rate limit for invite code acceptance.
+    Returns True if allowed, False if rate limited.
+    Max 5 attempts per hour, lockout for 1 hour after 5 failures.
+    """
+    # Prefer user_id over IP address for rate limiting
+    if user_id:
+        key = f"user_{user_id}"
+    elif ip_address:
+        key = f"ip_{ip_address}"
+    else:
+        # Fallback if neither is available
+        key = "anonymous"
+    now = datetime.utcnow()
+    
+    if key in _invite_code_attempts:
+        record = _invite_code_attempts[key]
+        if record.get("lockout_until") and now < record["lockout_until"]:
+            return False
+        if record.get("count", 0) >= 5:
+            # Lockout for 1 hour
+            _invite_code_attempts[key] = {
+                "count": 5,
+                "lockout_until": now + timedelta(hours=1)
+            }
+            return False
+        # Reset count after 1 hour
+        if record.get("last_attempt") and (now - record["last_attempt"]).total_seconds() > 3600:
+            _invite_code_attempts[key] = {"count": 0, "last_attempt": now}
+            return True
+    else:
+        _invite_code_attempts[key] = {"count": 0, "last_attempt": now}
+        return True
+    
+    return True
+
+
+def increment_rate_limit(user_id: Optional[int] = None, ip_address: Optional[str] = None) -> None:
+    """Increment rate limit counter for failed invite code attempt"""
+    # Prefer user_id over IP address for rate limiting
+    if user_id:
+        key = f"user_{user_id}"
+    elif ip_address:
+        key = f"ip_{ip_address}"
+    else:
+        # Fallback if neither is available
+        key = "anonymous"
+    now = datetime.utcnow()
+    
+    if key in _invite_code_attempts:
+        record = _invite_code_attempts[key]
+        # Reset if more than 1 hour passed
+        if record.get("last_attempt") and (now - record["last_attempt"]).total_seconds() > 3600:
+            _invite_code_attempts[key] = {"count": 1, "last_attempt": now}
+        else:
+            _invite_code_attempts[key] = {
+                "count": record.get("count", 0) + 1,
+                "last_attempt": now
+            }
+    else:
+        _invite_code_attempts[key] = {"count": 1, "last_attempt": now}
+
+
+def check_partner_access(
+    requester: User,
+    mother_id: int,
+    access_type: str = "summary",
+    screening_type: Optional[str] = None
+) -> tuple[bool, Optional[MotherPartnerLink]]:
+    """
+    Authorization helper: Check if requester can access mother's screening data.
+    
+    Returns:
+        (allowed: bool, link: Optional[MotherPartnerLink])
+    
+    Rules:
+    - Mother accessing own data: Always allowed
+    - Partner accessing linked mother: Allowed if link is active and permissions match
+    - Otherwise: Denied
+    """
+    # Mother accessing own data
+    if requester.id == mother_id:
+        return True, None
+    
+    # Partner accessing mother's data
+    if requester.role == "partner":
+        with Session(engine) as session:
+            link = session.query(MotherPartnerLink).filter(
+                MotherPartnerLink.mother_id == mother_id,
+                MotherPartnerLink.partner_id == requester.id,
+                MotherPartnerLink.status == "active"
+            ).first()
+            
+            if not link:
+                return False, None
+            
+            # Parse permissions
+            try:
+                permissions = json.loads(link.permissions_json)
+            except:
+                return False, None
+            
+            # Check access level
+            access_level = permissions.get("access_level", "latest_summary")
+            if access_type == "history" and access_level == "latest_summary":
+                return False, link
+            
+            # Check screening type permission
+            if screening_type:
+                allowed_types = permissions.get("screening_types", [])
+                if screening_type not in allowed_types:
+                    return False, link
+            
+            return True, link
+    
+    return False, None
+
+
+def log_partner_access(
+    partner_id: int,
+    mother_id: int,
+    access_type: str,
+    resource_id: Optional[int] = None
+) -> None:
+    """Log partner access to mother's screening data for audit"""
+    try:
+        with Session(engine) as session:
+            audit = PartnerAccessAudit(
+                partner_id=partner_id,
+                mother_id=mother_id,
+                access_type=access_type,
+                resource_id=resource_id
+            )
+            session.add(audit)
+            session.commit()
+    except Exception as e:
+        logger.error(f"Error logging partner access: {str(e)}", exc_info=True)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -4771,3 +4974,638 @@ def get_published_articles(limit: int = Query(20, ge=1, le=100)):
     except Exception as e:
         logger.error(f"Error fetching published articles: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error fetching published articles: {str(e)}")
+
+
+# ==================== Partner Invitation APIs ====================
+
+@app.post("/partner/invite/create")
+def create_partner_invite(
+    invite_data: CreatePartnerInviteSchema,
+    current_user: User = Depends(get_current_user),
+    background_tasks: BackgroundTasks = BackgroundTasks()
+):
+    """
+    Mother creates an invite for a partner.
+    Generates invite code, stores it, and emails it to partner.
+    """
+    try:
+        # Only mothers can create invites
+        if current_user.role != "mother":
+            raise HTTPException(status_code=403, detail="Only mothers can create partner invites")
+        
+        # Check if there's already an active link with this partner email
+        with Session(engine) as session:
+            # Check if partner email exists as a user
+            partner_user = session.query(User).filter(User.email == invite_data.partner_email).first()
+            if partner_user:
+                # Check for existing active link
+                existing_link = session.query(MotherPartnerLink).filter(
+                    MotherPartnerLink.mother_id == current_user.id,
+                    MotherPartnerLink.partner_id == partner_user.id,
+                    MotherPartnerLink.status == "active"
+                ).first()
+                if existing_link:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="An active link already exists with this partner"
+                    )
+            
+            # Check for existing pending invite (not expired, not used)
+            existing_invite = session.query(PartnerInvite).filter(
+                PartnerInvite.mother_id == current_user.id,
+                PartnerInvite.partner_email == invite_data.partner_email,
+                PartnerInvite.used == False,
+                PartnerInvite.expires_at > datetime.utcnow()
+            ).first()
+            
+            if existing_invite:
+                # Mark old invite as used and create new one
+                existing_invite.used = True
+                session.commit()
+            
+            # Generate invite code
+            invite_code = generate_invite_code()
+            
+            # Ensure uniqueness
+            while session.query(PartnerInvite).filter(PartnerInvite.invite_code == invite_code).first():
+                invite_code = generate_invite_code()
+            
+            # Create permissions JSON
+            permissions = {
+                "access_level": invite_data.access_level,
+                "screening_types": invite_data.screening_types
+            }
+            
+            # Create invite (24 hour expiry)
+            invite = PartnerInvite(
+                invite_code=invite_code,
+                mother_id=current_user.id,
+                partner_email=invite_data.partner_email,
+                permissions_json=json.dumps(permissions),
+                expires_at=datetime.utcnow() + timedelta(hours=24),
+                used=False
+            )
+            session.add(invite)
+            session.commit()
+            
+            # Send email in background
+            background_tasks.add_task(
+                send_partner_invite_email,
+                invite_data.partner_email,
+                invite_code,
+                current_user.name
+            )
+            
+            return {
+                "message": "Invitation sent successfully",
+                "invite_code": invite_code,
+                "expires_at": invite.expires_at.isoformat()
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating partner invite: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error creating partner invite: {str(e)}")
+
+
+@app.get("/partner/invites")
+def list_mother_invites(current_user: User = Depends(get_current_user)):
+    """
+    Mother views all her pending invites (not expired, not used).
+    """
+    try:
+        if current_user.role != "mother":
+            raise HTTPException(status_code=403, detail="Only mothers can view their invites")
+        
+        with Session(engine) as session:
+            invites = session.query(PartnerInvite).filter(
+                PartnerInvite.mother_id == current_user.id,
+                PartnerInvite.used == False,
+                PartnerInvite.expires_at > datetime.utcnow()
+            ).order_by(PartnerInvite.created_at.desc()).all()
+            
+            invite_list = []
+            for invite in invites:
+                invite_list.append({
+                    "invite_code": invite.invite_code,
+                    "partner_email": invite.partner_email,
+                    "expires_at": invite.expires_at.isoformat(),
+                    "created_at": invite.created_at.isoformat()
+                })
+            
+            return invite_list
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error listing invites: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error listing invites: {str(e)}")
+
+
+@app.get("/partner/links")
+def list_mother_links(current_user: User = Depends(get_current_user)):
+    """
+    Mother views all her active and revoked partner links.
+    """
+    try:
+        if current_user.role != "mother":
+            raise HTTPException(status_code=403, detail="Only mothers can view their links")
+        
+        with Session(engine) as session:
+            links = session.query(MotherPartnerLink).filter(
+                MotherPartnerLink.mother_id == current_user.id
+            ).order_by(MotherPartnerLink.created_at.desc()).all()
+            
+            link_list = []
+            for link in links:
+                partner = session.query(User).filter(User.id == link.partner_id).first()
+                link_list.append({
+                    "link_id": f"link_{link.id}",
+                    "partner_id": str(partner.id) if partner else None,
+                    "partner_name": partner.name if partner else "Unknown",
+                    "partner_email": partner.email if partner else "Unknown",
+                    "status": link.status,
+                    "permissions": json.loads(link.permissions_json) if link.permissions_json else {},
+                    "created_at": link.created_at.isoformat(),
+                    "revoked_at": link.revoked_at.isoformat() if link.revoked_at else None
+                })
+            
+            return link_list
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error listing links: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error listing links: {str(e)}")
+
+
+@app.post("/partner/links/{link_id}/revoke")
+def revoke_partner_link(link_id: str, current_user: User = Depends(get_current_user)):
+    """
+    Mother revokes access for a partner link.
+    """
+    try:
+        if current_user.role != "mother":
+            raise HTTPException(status_code=403, detail="Only mothers can revoke links")
+        
+        # Extract numeric ID from "link_123"
+        try:
+            link_id_int = int(link_id.replace("link_", ""))
+        except:
+            raise HTTPException(status_code=400, detail="Invalid link ID format")
+        
+        with Session(engine) as session:
+            link = session.query(MotherPartnerLink).filter(
+                MotherPartnerLink.id == link_id_int,
+                MotherPartnerLink.mother_id == current_user.id
+            ).first()
+            
+            if not link:
+                raise HTTPException(status_code=404, detail="Link not found")
+            
+            if link.status == "revoked":
+                raise HTTPException(status_code=400, detail="Link is already revoked")
+            
+            link.status = "revoked"
+            link.revoked_at = datetime.utcnow()
+            link.updated_at = datetime.utcnow()
+            session.commit()
+            
+            return {"message": "Link revoked successfully", "link_id": link_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error revoking link: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error revoking link: {str(e)}")
+
+
+@app.post("/partner/invite/accept")
+def accept_partner_invite(
+    invite_data: AcceptInviteSchema,
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Partner accepts an invite code to link with a mother.
+    Includes rate limiting for brute force protection.
+    """
+    try:
+        # Only partners can accept invites
+        if current_user.role != "partner":
+            raise HTTPException(status_code=403, detail="Only partners can accept invites")
+        
+        # Get IP address for rate limiting (if available)
+        ip_address = None
+        try:
+            if hasattr(request, "client") and request.client:
+                ip_address = request.client.host
+        except:
+            pass
+        
+        # Check rate limit
+        if not check_rate_limit(current_user.id, ip_address):
+            raise HTTPException(
+                status_code=429,
+                detail="Too many failed attempts. Please try again in 1 hour."
+            )
+        
+        with Session(engine) as session:
+            # Find invite
+            invite = session.query(PartnerInvite).filter(
+                PartnerInvite.invite_code == invite_data.invite_code.upper()
+            ).first()
+            
+            if not invite:
+                increment_rate_limit(current_user.id, ip_address)
+                raise HTTPException(status_code=404, detail="Invalid invite code")
+            
+            # Check if expired
+            if invite.expires_at < datetime.utcnow():
+                increment_rate_limit(current_user.id, ip_address)
+                raise HTTPException(status_code=400, detail="Invite code has expired")
+            
+            # Check if already used
+            if invite.used:
+                increment_rate_limit(current_user.id, ip_address)
+                raise HTTPException(status_code=400, detail="Invite code has already been used")
+            
+            # Check if partner email matches
+            if invite.partner_email.lower() != current_user.email.lower():
+                increment_rate_limit(current_user.id, ip_address)
+                raise HTTPException(
+                    status_code=403,
+                    detail="This invite code was sent to a different email address"
+                )
+            
+            # Check for existing active link
+            existing_link = session.query(MotherPartnerLink).filter(
+                MotherPartnerLink.mother_id == invite.mother_id,
+                MotherPartnerLink.partner_id == current_user.id,
+                MotherPartnerLink.status == "active"
+            ).first()
+            
+            if existing_link:
+                raise HTTPException(
+                    status_code=409,
+                    detail="You are already linked to this mother"
+                )
+            
+            # Create link
+            link = MotherPartnerLink(
+                mother_id=invite.mother_id,
+                partner_id=current_user.id,
+                status="active",
+                permissions_json=invite.permissions_json
+            )
+            session.add(link)
+            
+            # Mark invite as used
+            invite.used = True
+            session.commit()
+            
+            # Get mother info
+            mother = session.query(User).filter(User.id == invite.mother_id).first()
+            
+            return {
+                "message": "Invitation accepted successfully",
+                "mother_id": str(mother.id) if mother else None,
+                "mother_name": mother.name if mother else "Unknown"
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error accepting invite: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error accepting invite: {str(e)}")
+
+
+@app.get("/partner/linked-mothers")
+def get_partner_linked_mothers(current_user: User = Depends(get_current_user)):
+    """
+    Partner views all mothers they are linked to.
+    """
+    try:
+        if current_user.role != "partner":
+            raise HTTPException(status_code=403, detail="Only partners can view linked mothers")
+        
+        with Session(engine) as session:
+            links = session.query(MotherPartnerLink).filter(
+                MotherPartnerLink.partner_id == current_user.id
+            ).order_by(MotherPartnerLink.created_at.desc()).all()
+            
+            link_list = []
+            for link in links:
+                mother = session.query(User).filter(User.id == link.mother_id).first()
+                link_list.append({
+                    "link_id": f"link_{link.id}",
+                    "mother_id": str(mother.id) if mother else None,
+                    "mother_name": mother.name if mother else "Unknown",
+                    "mother_email": mother.email if mother else "Unknown",
+                    "status": link.status,
+                    "permissions": json.loads(link.permissions_json) if link.permissions_json else {},
+                    "created_at": link.created_at.isoformat()
+                })
+            
+            return link_list
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching linked mothers: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error fetching linked mothers: {str(e)}")
+
+
+@app.get("/screening/{mother_id}/summary")
+def get_screening_summary(
+    mother_id: int,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get screening summary for a mother.
+    Accessible by the mother or an active linked partner.
+    """
+    try:
+        # Extract numeric ID from "mother_123" or just "123"
+        try:
+            if isinstance(mother_id, str):
+                mother_id_int = int(mother_id.replace("mother_", ""))
+            else:
+                mother_id_int = mother_id
+        except:
+            raise HTTPException(status_code=400, detail="Invalid mother ID format")
+        
+        # Check authorization
+        allowed, link = check_partner_access(current_user, mother_id_int, "summary")
+        if not allowed:
+            raise HTTPException(status_code=403, detail="Access denied")
+        
+        with Session(engine) as session:
+            # Verify mother exists
+            mother = session.query(User).filter(User.id == mother_id_int).first()
+            if not mother:
+                raise HTTPException(status_code=404, detail="Mother not found")
+            
+            # Log partner access
+            if current_user.role == "partner" and link:
+                log_partner_access(current_user.id, mother_id_int, "summary")
+            from sqlalchemy import func
+            
+            # Get all EPDS and PPD results
+            epds_results = session.query(EPDSResult).filter(
+                EPDSResult.user_id == mother_id_int
+            ).all()
+            
+            ppd_results = session.query(PPDRiskAssessment).filter(
+                PPDRiskAssessment.user_id == mother_id_int
+            ).all()
+            
+            # Identify hybrid screenings: EPDS with matching PPD within 5 seconds
+            hybrid_epds_ids = set()
+            hybrid_ppd_ids = set()
+            hybrid_count = 0
+            
+            for epds in epds_results:
+                matching_ppd = session.query(PPDRiskAssessment).filter(
+                    PPDRiskAssessment.user_id == mother_id_int,
+                    func.abs(
+                        func.extract('epoch', epds.created_at - PPDRiskAssessment.created_at)
+                    ) <= 5
+                ).first()
+                if matching_ppd:
+                    hybrid_epds_ids.add(epds.id)
+                    hybrid_ppd_ids.add(matching_ppd.id)
+                    hybrid_count += 1
+            
+            # Count standalone EPDS and PPD
+            standalone_epds_count = len(epds_results) - len(hybrid_epds_ids)
+            standalone_ppd_count = len(ppd_results) - len(hybrid_ppd_ids)
+            
+            epds_count = len(epds_results)
+            ppd_count = len(ppd_results)
+            
+            # Get latest results
+            latest_epds = session.query(EPDSResult).filter(
+                EPDSResult.user_id == mother_id_int
+            ).order_by(EPDSResult.created_at.desc()).first()
+            
+            latest_ppd = session.query(PPDRiskAssessment).filter(
+                PPDRiskAssessment.user_id == mother_id_int
+            ).order_by(PPDRiskAssessment.created_at.desc()).first()
+            
+            # Parse permissions to check what screening types are allowed
+            allowed_types = []
+            if link:
+                try:
+                    permissions = json.loads(link.permissions_json)
+                    allowed_types = permissions.get("screening_types", [])
+                except:
+                    pass
+            else:
+                # Mother accessing own data - all types allowed
+                allowed_types = ["epds", "ppd", "hybrid"]
+            
+            summary = {
+                "total_screenings": standalone_epds_count + standalone_ppd_count + hybrid_count,
+                "epds_count": standalone_epds_count if "epds" in allowed_types or not link else 0,
+                "ppd_count": standalone_ppd_count if "ppd" in allowed_types or not link else 0,
+                "hybrid_count": hybrid_count if "hybrid" in allowed_types or not link else 0,
+                "latest_epds": None,
+                "latest_ppd": None,
+                "latest_hybrid": None
+            }
+            
+            if latest_epds and ("epds" in allowed_types or not link):
+                summary["latest_epds"] = {
+                    "id": f"epds_{latest_epds.id}",
+                    "total_score": latest_epds.total_score,
+                    "risk_level": latest_epds.risk_level,
+                    "created_at": latest_epds.created_at.isoformat()
+                }
+            
+            if latest_ppd and ("ppd" in allowed_types or not link):
+                try:
+                    ml_response = json.loads(latest_ppd.ml_response_json)
+                    summary["latest_ppd"] = {
+                        "id": f"ppd_{latest_ppd.id}",
+                        "result": ml_response,
+                        "created_at": latest_ppd.created_at.isoformat()
+                    }
+                except:
+                    summary["latest_ppd"] = {
+                        "id": f"ppd_{latest_ppd.id}",
+                        "created_at": latest_ppd.created_at.isoformat()
+                    }
+            
+            return summary
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching screening summary: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error fetching screening summary: {str(e)}")
+
+
+@app.get("/screening/{mother_id}/history")
+def get_screening_history(
+    mother_id: int,
+    screening_type: Optional[str] = Query(None, description="Filter by type: epds, ppd, hybrid"),
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get screening history for a mother (paginated).
+    Accessible by the mother or an active linked partner with 'full_history' permission.
+    """
+    try:
+        # Extract numeric ID
+        try:
+            if isinstance(mother_id, str):
+                mother_id_int = int(mother_id.replace("mother_", ""))
+            else:
+                mother_id_int = mother_id
+        except:
+            raise HTTPException(status_code=400, detail="Invalid mother ID format")
+        
+        # Check authorization
+        allowed, link = check_partner_access(current_user, mother_id_int, "history", screening_type)
+        if not allowed:
+            raise HTTPException(status_code=403, detail="Access denied")
+        
+        with Session(engine) as session:
+            # Verify mother exists
+            mother = session.query(User).filter(User.id == mother_id_int).first()
+            if not mother:
+                raise HTTPException(status_code=404, detail="Mother not found")
+            
+            # Log partner access
+            if current_user.role == "partner" and link:
+                log_partner_access(current_user.id, mother_id_int, "history", None)
+            
+            # Parse permissions
+            allowed_types = []
+            if link:
+                try:
+                    permissions = json.loads(link.permissions_json)
+                    allowed_types = permissions.get("screening_types", [])
+                except:
+                    pass
+            else:
+                allowed_types = ["epds", "ppd", "hybrid"]
+            
+            # Filter by allowed types
+            if screening_type and screening_type not in allowed_types:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Access to {screening_type} screening type is not permitted"
+                )
+            
+            history_items = []
+            
+            # Get EPDS results (fetch all, then filter and paginate)
+            if (not screening_type or screening_type == "epds") and "epds" in allowed_types:
+                epds_results = session.query(EPDSResult).filter(
+                    EPDSResult.user_id == mother_id_int
+                ).order_by(EPDSResult.created_at.desc()).all()
+                
+                for result in epds_results:
+                    history_items.append({
+                        "id": f"epds_{result.id}",
+                        "type": "epds",
+                        "result": {
+                            "total_score": result.total_score,
+                            "risk_level": result.risk_level,
+                            "q1": result.q1,
+                            "q2": result.q2,
+                            "q3": result.q3,
+                            "q4": result.q4,
+                            "q5": result.q5,
+                            "q6": result.q6,
+                            "q7": result.q7,
+                            "q8": result.q8,
+                            "q9": result.q9,
+                            "q10": result.q10
+                        },
+                        "created_at": result.created_at.isoformat()
+                    })
+            
+            # Get PPD results
+            if (not screening_type or screening_type == "ppd") and "ppd" in allowed_types:
+                ppd_results = session.query(PPDRiskAssessment).filter(
+                    PPDRiskAssessment.user_id == mother_id_int
+                ).order_by(PPDRiskAssessment.created_at.desc()).all()
+                
+                for result in ppd_results:
+                    try:
+                        ml_response = json.loads(result.ml_response_json)
+                    except:
+                        ml_response = {}
+                    
+                    history_items.append({
+                        "id": f"ppd_{result.id}",
+                        "type": "ppd",
+                        "result": ml_response,
+                        "created_at": result.created_at.isoformat()
+                    })
+            
+            # Get hybrid screening results
+            if (not screening_type or screening_type == "hybrid") and "hybrid" in allowed_types:
+                from sqlalchemy import func
+                screener = HybridScreener()
+                
+                # Get all EPDS results
+                all_epds = session.query(EPDSResult).filter(
+                    EPDSResult.user_id == mother_id_int
+                ).order_by(EPDSResult.created_at.desc()).all()
+                
+                for epds in all_epds:
+                    # Find matching PPD within 5 seconds
+                    matching_ppd = session.query(PPDRiskAssessment).filter(
+                        PPDRiskAssessment.user_id == mother_id_int,
+                        func.abs(
+                            func.extract('epoch', epds.created_at - PPDRiskAssessment.created_at)
+                        ) <= 5
+                    ).first()
+                    
+                    if matching_ppd:
+                        try:
+                            # Re-run hybrid screening to get the result
+                            ml_response = json.loads(matching_ppd.ml_response_json)
+                            ml_prob = ml_response.get("probability", 0.0) if isinstance(ml_response, dict) else 0.0
+                            
+                            epds_responses = [epds.q1, epds.q2, epds.q3, epds.q4, epds.q5,
+                                            epds.q6, epds.q7, epds.q8, epds.q9, epds.q10]
+                            
+                            hybrid_result = screener.screen(
+                                epds_responses=epds_responses,
+                                ml_raw_probability=ml_prob
+                            )
+                            
+                            history_items.append({
+                                "id": f"hybrid_{epds.id}",
+                                "type": "hybrid",
+                                "result": {
+                                    "risk_label": hybrid_result.risk_label.value,
+                                    "final_probability": hybrid_result.final_probability,
+                                    "is_critical": hybrid_result.risk_label.value == "Critical",
+                                    "explanation": hybrid_result.explanation,
+                                    "epds_total": epds.total_score,
+                                    "ml_probability": ml_prob
+                                },
+                                "created_at": epds.created_at.isoformat()
+                            })
+                        except Exception as e:
+                            logger.warning(f"Could not process hybrid screening {epds.id}: {str(e)}")
+                            continue
+            
+            # Sort by created_at descending
+            history_items.sort(key=lambda x: x["created_at"], reverse=True)
+            
+            # Apply pagination after combining all results
+            total = len(history_items)
+            paginated_items = history_items[offset:offset + limit]
+            
+            return {
+                "total": total,
+                "items": paginated_items
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching screening history: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error fetching screening history: {str(e)}")

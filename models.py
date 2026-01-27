@@ -274,3 +274,39 @@ class Article(SQLModel, table=True):
     published_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime, nullable=True))
     created_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
     updated_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
+
+
+# ==================== Partner Invitation Models ====================
+
+class PartnerInvite(SQLModel, table=True):
+    """Model to store pending partner invitations"""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    invite_code: str = Field(sa_column=Column(String(10), unique=True, nullable=False))  # Short random code
+    mother_id: int = Field(foreign_key="user.id", nullable=False)
+    partner_email: str = Field(sa_column=Column(String(100), nullable=False))
+    permissions_json: str = Field(sa_column=Column(Text, nullable=False))  # JSON string with permissions
+    expires_at: datetime = Field(sa_column=Column(DateTime, nullable=False))
+    used: bool = Field(default=False, sa_column=Column(Boolean, nullable=False))
+    created_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
+
+
+class MotherPartnerLink(SQLModel, table=True):
+    """Model to store active links between mothers and partners"""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    mother_id: int = Field(foreign_key="user.id", nullable=False)
+    partner_id: int = Field(foreign_key="user.id", nullable=False)
+    status: str = Field(default="active", sa_column=Column(String(20), nullable=False))  # "active" or "revoked"
+    permissions_json: str = Field(sa_column=Column(Text, nullable=False))  # JSON string with permissions snapshot
+    created_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
+    updated_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
+    revoked_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime, nullable=True))
+
+
+class PartnerAccessAudit(SQLModel, table=True):
+    """Model to audit partner access to mother's screening data"""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    partner_id: int = Field(foreign_key="user.id", nullable=False)
+    mother_id: int = Field(foreign_key="user.id", nullable=False)
+    access_type: str = Field(sa_column=Column(String(50), nullable=False))  # "summary", "history", "epds", "ppd", "hybrid"
+    resource_id: Optional[int] = Field(default=None, sa_column=Column(Integer, nullable=True))  # Specific result ID if applicable
+    created_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
