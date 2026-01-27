@@ -649,3 +649,453 @@ class ScreeningHistoryResponseSchema(BaseModel):
     total: int
     items: List[ScreeningHistoryItemSchema]
 
+
+# Additional response schemas for partner invitation endpoints
+
+class CreateInviteResponseSchema(BaseModel):
+    message: str
+    invite_code: str
+    expires_at: str
+
+
+class AcceptInviteResponseSchema(BaseModel):
+    message: str
+    mother_id: Optional[str] = None
+    mother_name: str
+
+
+class RevokeLinkResponseSchema(BaseModel):
+    message: str
+    link_id: str
+
+
+# ==================== Additional Response Schemas ====================
+
+class ScreeningCountResponseSchema(BaseModel):
+    epds_screening_count: int
+    ppd_risk_assessment_count: int
+    hybrid_screening_count: int
+    total_screening_count: int
+
+
+class HybridScreeningResultResponseSchema(BaseModel):
+    id: int
+    risk_label: str
+    final_probability: float
+    is_critical: bool
+    clinical_recommendation: str
+    explanation: str
+    fusion_method: str
+    metrics: dict
+    audit: dict
+    epds_data: dict
+    ppd_data: dict
+    created_at: str
+    system_disclaimer: str
+
+
+class PPDRiskFormConfigResponseSchema(BaseModel):
+    app_title: str
+    description: str
+    model_file: Optional[str] = None
+    fields: List[dict]
+
+
+class PPDHistoryItemSchema(BaseModel):
+    id: str
+    result: dict
+    createdAt: str
+
+
+class PPDHistoryResponseSchema(BaseModel):
+    items: List[PPDHistoryItemSchema]
+
+
+class PPDResultDetailSchema(BaseModel):
+    id: str
+    result: dict
+    createdAt: str
+
+
+class HybridScreeningSubmitResponseSchema(BaseModel):
+    id: int
+    risk_label: str
+    final_probability: float
+    is_critical: bool
+    clinical_recommendation: str
+    explanation: str
+    fusion_method: str
+    metrics: dict
+    audit: dict
+    epds_data: dict
+    ppd_data: dict
+    created_at: str
+    system_disclaimer: str
+
+
+class CreatePostResponseSchema(BaseModel):
+    message: str
+    id: str
+
+
+class ViewPostListResponseSchema(BaseModel):
+    items: List[ViewPostResponseSchema]
+
+
+class ToggleLikeResponseSchema(BaseModel):
+    id: str
+    likeCount: int
+    hasLiked: bool
+
+
+class CreateCommentResponseSchema(BaseModel):
+    message: str
+    id: str
+
+
+class ToggleCommentLikeResponseSchema(BaseModel):
+    id: str
+    likeCount: int
+    hasLiked: bool
+
+
+class UpdatePostResponseSchema(BaseModel):
+    message: str
+    id: str
+
+
+class DeletePostResponseSchema(BaseModel):
+    message: str
+    id: str
+
+
+class PostCountResponseSchema(BaseModel):
+    total_posts: int
+
+
+class UserPostsResponseSchema(BaseModel):
+    items: List[ViewPostResponseSchema]
+
+
+class CategoryListResponseSchema(BaseModel):
+    items: List[CategoryResponseSchema]
+
+
+class CreateCategoryResponseSchema(BaseModel):
+    message: str
+    id: str
+
+
+class UploadImageResponseSchema(BaseModel):
+    image_url: str
+
+
+class CreateGroupResponseSchema(BaseModel):
+    message: str
+    id: str
+
+
+class JoinGroupResponseSchema(BaseModel):
+    message: str
+    group_id: str
+
+
+class UserGroupsResponseSchema(BaseModel):
+    items: List[ViewGroupResponseSchema]
+
+
+# ViewGroupPostListResponseSchema - Use List[ViewGroupPostResponseSchema] directly in response_model
+
+
+class UpdateGroupResponseSchema(BaseModel):
+    message: str
+    id: str
+
+
+class DeleteGroupResponseSchema(BaseModel):
+    message: str
+    id: str
+
+
+class CreateGroupPostResponseSchema(BaseModel):
+    message: str
+    id: str
+
+
+class UpdateGroupPostResponseSchema(BaseModel):
+    message: str
+    id: str
+
+
+class DeleteGroupPostResponseSchema(BaseModel):
+    message: str
+    id: str
+
+
+class CreateGroupCommentResponseSchema(BaseModel):
+    message: str
+    id: str
+
+
+class ToggleGroupCommentLikeResponseSchema(BaseModel):
+    id: str
+    likeCount: int
+    hasLiked: bool
+
+
+class ContributorStepResponseSchema(BaseModel):
+    message: str
+
+
+class UploadArticleImageResponseSchema(BaseModel):
+    image_url: str
+
+
+class CreateArticleResponseSchema(BaseModel):
+    message: str
+    id: str
+    title: str
+    preview: str
+    content: str
+    image: str
+    tags: List[str]
+    category: dict
+    status: str
+    like_count: int
+    created_at: str
+
+
+class UpdateArticleResponseSchema(BaseModel):
+    message: str
+    id: str
+
+
+class DeleteArticleResponseSchema(BaseModel):
+    message: str
+    id: str
+
+
+# ArticleListResponseSchema - Use List[dict] directly in response_model
+
+
+# ArticlePublishedListResponseSchema - Use List[dict] directly in response_model
+
+
+class PublishArticleResponseSchema(BaseModel):
+    message: str
+    id: str
+
+
+# ==================== General Response Schemas ====================
+
+class MessageResponseSchema(BaseModel):
+    message: str
+
+
+class RootResponseSchema(BaseModel):
+    message: str
+
+
+class UserInfoSchema(BaseModel):
+    id: int
+    email: str
+    name: str
+    role: str
+
+
+class SignupResponseSchema(BaseModel):
+    message: str
+    email: str
+    access_token: str
+    token_type: str
+    user: UserInfoSchema
+    firebase_token: Optional[str] = None
+
+
+class LoginResponseSchema(BaseModel):
+    message: str
+    email: str
+    name: str
+    role: str
+    access_token: str
+    token_type: str
+    user: UserInfoSchema
+    firebase_token: Optional[str] = None
+
+
+class ProfileResponseSchema(BaseModel):
+    email: str
+    name: str
+    role: str
+
+
+class PostCountResponseSchema(BaseModel):
+    community_post_count: int
+    group_post_count: int
+    total_post_count: int
+
+
+class ArticleStatsResponseSchema(BaseModel):
+    total_article_count: int
+    published_article_count: int
+    pending_article_count: int
+    total_like_count: int
+
+
+class ToggleLikeResponseSchema(BaseModel):
+    id: str
+    likeCount: int
+    hasLiked: bool
+
+
+class UploadImageResponseSchema(BaseModel):
+    message: str
+    image_url: str
+
+
+class CategoryItemSchema(BaseModel):
+    id: str
+    name: str
+
+
+class CreateCategoryResponseSchema(BaseModel):
+    message: str
+    category: CategoryItemSchema
+
+
+class CreatePostResponseSchema(BaseModel):
+    message: str
+    post_id: str
+
+
+class CreateGroupResponseSchema(BaseModel):
+    message: str
+    group_id: str
+
+
+class JoinGroupResponseSchema(BaseModel):
+    message: str
+    group_id: str
+
+
+class CreateCommentResponseSchema(BaseModel):
+    message: str
+    comment_id: str
+
+
+class ToggleCommentLikeResponseSchema(BaseModel):
+    id: str
+    likeCount: int
+    hasLiked: bool
+
+
+class EPDSResultItemSchema(BaseModel):
+    id: str
+    total_score: int
+    risk_level: str
+    created_at: str
+
+
+class EPDSHistoryResponseSchema(BaseModel):
+    results: List[EPDSResultItemSchema]
+
+
+class EPDSResultDetailSchema(BaseModel):
+    id: str
+    q1: int
+    q2: int
+    q3: int
+    q4: int
+    q5: int
+    q6: int
+    q7: int
+    q8: int
+    q9: int
+    q10: int
+    total_score: int
+    risk_level: str
+    created_at: str
+
+
+class ScreeningCountResponseSchema(BaseModel):
+    epds_screening_count: int
+    ppd_risk_assessment_count: int
+    hybrid_screening_count: int
+    total_screening_count: int
+
+
+class HybridScreeningHistoryItemSchema(BaseModel):
+    id: str
+    epds_total: int
+    ml_probability: float
+    risk_label: str
+    final_probability: float
+    explanation: str
+    created_at: str
+
+
+class HybridScreeningHistoryResponseSchema(BaseModel):
+    results: List[HybridScreeningHistoryItemSchema]
+
+
+class HybridScreeningResultResponseSchema(BaseModel):
+    id: str
+    epds_total: int
+    ml_probability: float
+    risk_label: str
+    final_probability: float
+    is_critical: bool
+    explanation: str
+    fusion_method: str
+    created_at: str
+
+
+class PPDHistoryItemSchema(BaseModel):
+    id: str
+    result: dict
+    created_at: str
+
+
+class PPDHistoryResponseSchema(BaseModel):
+    results: List[PPDHistoryItemSchema]
+
+
+class PPDResultDetailSchema(BaseModel):
+    id: str
+    result: dict
+    created_at: str
+
+
+class PPDRiskFormConfigResponseSchema(BaseModel):
+    app_title: str
+    description: str
+    model_file: str
+    fields: List[dict]
+
+
+class EPDSAnswersSchema(BaseModel):
+    q1: int
+    q2: int
+    q3: int
+    q4: int
+    q5: int
+    q6: int
+    q7: int
+    q8: int
+    q9: int
+    q10: int
+
+
+class EPDSResultDataSchema(BaseModel):
+    id: int
+    total_score: int
+    risk_level: str
+    answers: EPDSAnswersSchema
+    created_at: str
+
+
+class EPDSSubmitResponseSchema(BaseModel):
+    message: str
+    result: EPDSResultDataSchema
+    interpretation: str
+

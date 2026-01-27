@@ -115,6 +115,40 @@ from schemas import (
     ScreeningSummarySchema,
     ScreeningHistoryItemSchema,
     ScreeningHistoryResponseSchema,
+    CreateInviteResponseSchema,
+    AcceptInviteResponseSchema,
+    RevokeLinkResponseSchema,
+    MessageResponseSchema,
+    RootResponseSchema,
+    UserInfoSchema,
+    SignupResponseSchema,
+    LoginResponseSchema,
+    ProfileResponseSchema,
+    PostCountResponseSchema,
+    ArticleStatsResponseSchema,
+    ToggleLikeResponseSchema,
+    UploadImageResponseSchema,
+    CategoryItemSchema,
+    CreateCategoryResponseSchema,
+    CreatePostResponseSchema,
+    CreateGroupResponseSchema,
+    JoinGroupResponseSchema,
+    CreateCommentResponseSchema,
+    ToggleCommentLikeResponseSchema,
+    EPDSResultItemSchema,
+    EPDSHistoryResponseSchema,
+    EPDSResultDetailSchema,
+    ScreeningCountResponseSchema,
+    HybridScreeningHistoryItemSchema,
+    HybridScreeningHistoryResponseSchema,
+    HybridScreeningResultResponseSchema,
+    PPDHistoryItemSchema,
+    PPDHistoryResponseSchema,
+    PPDResultDetailSchema,
+    PPDRiskFormConfigResponseSchema,
+    EPDSAnswersSchema,
+    EPDSResultDataSchema,
+    EPDSSubmitResponseSchema,
 )
 
 # Logging is already set up above (before Supabase import)
@@ -626,11 +660,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.get("/")
+@app.get("/", response_model=RootResponseSchema)
 def root():
     return {"message": "Hello, FastAPI is running!"}
 
-@app.post("/signup")
+@app.post("/signup", response_model=SignupResponseSchema)
 def signup(data: SignupSchema, background_tasks: BackgroundTasks):
     try:
         with Session(engine) as session:
@@ -681,7 +715,7 @@ def signup(data: SignupSchema, background_tasks: BackgroundTasks):
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Database connection error: {str(e)}")
 
-@app.post("/login")
+@app.post("/login", response_model=LoginResponseSchema)
 def login(data: LoginSchema):
     try:
         with Session(engine) as session:
@@ -723,7 +757,7 @@ def login(data: LoginSchema):
         raise HTTPException(status_code=503, detail=f"Database connection error: {str(e)}")
 
 
-@app.post("/forgot-password")
+@app.post("/forgot-password", response_model=MessageResponseSchema)
 def forgot_password(data: ForgotPasswordSchema, background_tasks: BackgroundTasks):
     """
     Request a password reset link to be sent to the user's email.
@@ -755,7 +789,7 @@ def forgot_password(data: ForgotPasswordSchema, background_tasks: BackgroundTask
         raise HTTPException(status_code=503, detail=f"Error processing password reset: {str(e)}")
 
 
-@app.post("/reset-password")
+@app.post("/reset-password", response_model=MessageResponseSchema)
 def reset_password(data: ResetPasswordSchema):
     """
     Reset the user's password using a token from the email.
@@ -790,7 +824,7 @@ def reset_password(data: ResetPasswordSchema):
         raise HTTPException(status_code=503, detail=f"Error resetting password: {str(e)}")
 
 
-@app.post("/logout")
+@app.post("/logout", response_model=MessageResponseSchema)
 def logout(current_user: User = Depends(get_current_user)):
     """
     Logout the authenticated user.
@@ -808,7 +842,7 @@ def logout(current_user: User = Depends(get_current_user)):
         raise HTTPException(status_code=503, detail=f"Error processing logout: {str(e)}")
 
 
-@app.get("/profile-view")
+@app.get("/profile-view", response_model=ProfileResponseSchema)
 def read_profile(current_user: User = Depends(get_current_user)):
     return {
         "email": current_user.email,
@@ -817,7 +851,7 @@ def read_profile(current_user: User = Depends(get_current_user)):
     }
 
 
-@app.patch("/change-password")
+@app.patch("/change-password", response_model=MessageResponseSchema)
 def change_password(data: ChangePasswordSchema, current_user: User = Depends(get_current_user)):
     try:
         with Session(engine) as session:
@@ -843,7 +877,7 @@ def change_password(data: ChangePasswordSchema, current_user: User = Depends(get
         raise HTTPException(status_code=503, detail=f"Database connection error: {str(e)}")
 
 
-@app.patch("/update-name")
+@app.patch("/update-name", response_model=MessageResponseSchema)
 def update_name(data: UpdateNameSchema, current_user: User = Depends(get_current_user)):
     """
     Update the authenticated user's name.
@@ -871,7 +905,7 @@ def update_name(data: UpdateNameSchema, current_user: User = Depends(get_current
         raise HTTPException(status_code=503, detail=f"Database connection error: {str(e)}")
 
 
-@app.delete("/delete-account")
+@app.delete("/delete-account", response_model=MessageResponseSchema)
 def delete_account(current_user: User = Depends(get_current_user)):
     try:
         with Session(engine) as session:
@@ -923,7 +957,7 @@ def calculate_epds_score(answers: EPDSAnswerSchema) -> tuple[int, str]:
     return total, risk_level
 
 
-@app.post("/epds-screen")
+@app.post("/epds-screen", response_model=EPDSSubmitResponseSchema)
 def submit_epds_screening(
     answers: EPDSAnswerSchema,
     current_user: User = Depends(get_current_user)
@@ -994,7 +1028,7 @@ def submit_epds_screening(
         raise HTTPException(status_code=503, detail=f"Error processing EPDS screening: {str(e)}")
 
 
-@app.get("/epds-screen/history")
+@app.get("/epds-screen/history", response_model=EPDSHistoryResponseSchema)
 def get_epds_history(current_user: User = Depends(get_current_user)):
     """
     Get the user's EPDS screening history.
@@ -1022,7 +1056,7 @@ def get_epds_history(current_user: User = Depends(get_current_user)):
         raise HTTPException(status_code=503, detail=f"Error fetching screening history: {str(e)}")
 
 
-@app.get("/hybrid-screen/history")
+@app.get("/hybrid-screen/history", response_model=HybridScreeningHistoryResponseSchema)
 def get_hybrid_screening_history(current_user: User = Depends(get_current_user)):
     """
     Get the user's hybrid screening history.
@@ -1164,7 +1198,7 @@ def get_screening_counts(current_user: User = Depends(get_current_user)):
         raise HTTPException(status_code=503, detail=f"Error fetching screening counts: {str(e)}")
 
 
-@app.get("/epds-screen/{result_id}")
+@app.get("/epds-screen/{result_id}", response_model=EPDSResultDetailSchema)
 def get_epds_result(result_id: int, current_user: User = Depends(get_current_user)):
     """
     Get a specific EPDS screening result by ID.
@@ -2199,7 +2233,7 @@ def toggle_community_post_like(post_id: int, current_user: User = Depends(get_cu
             session.add(post)
             session.commit()
             session.refresh(post)
-
+            
             return {
                 "id": f"post_{post.id}",
                 "likeCount": post.like_count,
@@ -2378,7 +2412,7 @@ def toggle_community_comment_like(comment_id: int, current_user: User = Depends(
                 .filter(CommunityCommentLike.comment_id == comment_id)
                 .count()
             )
-
+            
             return {
                 "id": f"comment_{comment.id}",
                 "likeCount": like_count,
@@ -3007,8 +3041,8 @@ def get_my_joined_groups(current_user: User = Depends(get_current_user)):
                 category = session.query(Category).filter(Category.id == group.category_id).first()
                 if not category:
                     continue
-                
-                # Get creator info
+            
+            # Get creator info
                 creator = session.query(User).filter(User.id == group.created_by_id).first()
                 if not creator:
                     continue
@@ -3142,7 +3176,7 @@ def update_group(group_id: int, group_data: UpdateGroupSchema, current_user: Use
                     "id": f"cat_{category.id:03d}",
                     "name": category.name
                 },
-                "createdBy": {
+                    "createdBy": {
                     "id": f"user_{creator.id}",
                     "name": creator.name
                 },
@@ -3815,7 +3849,7 @@ def update_step1_basic_profile(
             session.add(profile)
             session.commit()
             session.refresh(profile)
-
+            
             return {
                 "message": "Step 1 profile updated successfully",
                 "step1_basic_profile": {
@@ -3932,7 +3966,7 @@ def update_step2_education(
                 })
 
             session.commit()
-
+            
             return {
                 "message": "Step 2 education updated successfully",
                 "step2_education": created_educations
@@ -4978,7 +5012,7 @@ def get_published_articles(limit: int = Query(20, ge=1, le=100)):
 
 # ==================== Partner Invitation APIs ====================
 
-@app.post("/partner/invite/create")
+@app.post("/partner/invite/create", response_model=CreateInviteResponseSchema)
 def create_partner_invite(
     invite_data: CreatePartnerInviteSchema,
     current_user: User = Depends(get_current_user),
@@ -5068,7 +5102,7 @@ def create_partner_invite(
         raise HTTPException(status_code=500, detail=f"Error creating partner invite: {str(e)}")
 
 
-@app.get("/partner/invites")
+@app.get("/partner/invites", response_model=List[PartnerInviteResponseSchema])
 def list_mother_invites(current_user: User = Depends(get_current_user)):
     """
     Mother views all her pending invites (not expired, not used).
@@ -5101,7 +5135,7 @@ def list_mother_invites(current_user: User = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail=f"Error listing invites: {str(e)}")
 
 
-@app.get("/partner/links")
+@app.get("/partner/links", response_model=List[MotherPartnerLinkResponseSchema])
 def list_mother_links(current_user: User = Depends(get_current_user)):
     """
     Mother views all her active and revoked partner links.
@@ -5137,7 +5171,7 @@ def list_mother_links(current_user: User = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail=f"Error listing links: {str(e)}")
 
 
-@app.post("/partner/links/{link_id}/revoke")
+@app.post("/partner/links/{link_id}/revoke", response_model=RevokeLinkResponseSchema)
 def revoke_partner_link(link_id: str, current_user: User = Depends(get_current_user)):
     """
     Mother revokes access for a partner link.
@@ -5177,7 +5211,7 @@ def revoke_partner_link(link_id: str, current_user: User = Depends(get_current_u
         raise HTTPException(status_code=500, detail=f"Error revoking link: {str(e)}")
 
 
-@app.post("/partner/invite/accept")
+@app.post("/partner/invite/accept", response_model=AcceptInviteResponseSchema)
 def accept_partner_invite(
     invite_data: AcceptInviteSchema,
     request: Request,
@@ -5276,7 +5310,7 @@ def accept_partner_invite(
         raise HTTPException(status_code=500, detail=f"Error accepting invite: {str(e)}")
 
 
-@app.get("/partner/linked-mothers")
+@app.get("/partner/linked-mothers", response_model=List[PartnerLinkedMotherSchema])
 def get_partner_linked_mothers(current_user: User = Depends(get_current_user)):
     """
     Partner views all mothers they are linked to.
@@ -5311,7 +5345,7 @@ def get_partner_linked_mothers(current_user: User = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail=f"Error fetching linked mothers: {str(e)}")
 
 
-@app.get("/screening/{mother_id}/summary")
+@app.get("/screening/{mother_id}/summary", response_model=ScreeningSummarySchema)
 def get_screening_summary(
     mother_id: int,
     current_user: User = Depends(get_current_user)
@@ -5440,7 +5474,7 @@ def get_screening_summary(
         raise HTTPException(status_code=500, detail=f"Error fetching screening summary: {str(e)}")
 
 
-@app.get("/screening/{mother_id}/history")
+@app.get("/screening/{mother_id}/history", response_model=ScreeningHistoryResponseSchema)
 def get_screening_history(
     mother_id: int,
     screening_type: Optional[str] = Query(None, description="Filter by type: epds, ppd, hybrid"),
