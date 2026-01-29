@@ -5298,10 +5298,14 @@ def accept_partner_invite(
             # Get mother info
             mother = session.query(User).filter(User.id == invite.mother_id).first()
             
+            # Get partner user from session to get latest is_verified status
+            partner_user = session.query(User).filter(User.id == current_user.id).first()
+            
             return {
                 "message": "Invitation accepted successfully",
                 "mother_id": str(mother.id) if mother else None,
-                "mother_name": mother.name if mother else "Unknown"
+                "mother_name": mother.name if mother else "Unknown",
+                "is_verified": partner_user.is_verified if partner_user and hasattr(partner_user, 'is_verified') else False
             }
     except HTTPException:
         raise

@@ -662,6 +662,7 @@ class AcceptInviteResponseSchema(BaseModel):
     message: str
     mother_id: Optional[str] = None
     mother_name: str
+    is_verified: bool
 
 
 class RevokeLinkResponseSchema(BaseModel):

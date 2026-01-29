@@ -10,6 +10,7 @@ class User(SQLModel, table=True):
     email: str = Field(sa_column=Column(String(100), unique=True, nullable=False))
     password: str = Field(sa_column=Column(String(255), nullable=False))
     role: str = Field(sa_column=Column(String(20), nullable=False, default="mother"))
+    is_verified: bool = Field(default=False, sa_column=Column(Boolean, nullable=False))
 
 
 class EPDSResult(SQLModel, table=True):
