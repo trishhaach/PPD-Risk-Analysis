@@ -13,6 +13,7 @@ def init_db():
         print("Database initialized!")
         # Run migrations
         migrate_add_like_count_column()
+        migrate_add_is_verified_column()
         # Auto-migrate: Add any missing columns from models to database
         auto_migrate_model_schema()
         # Seed default categories if they don't exist
@@ -97,6 +98,35 @@ def migrate_add_like_count_column():
         print(f"Warning: Could not run like_count migration: {e}")
 
 
+def migrate_add_is_verified_column():
+    """Migration: Add is_verified column to user table if it doesn't exist"""
+    try:
+        from sqlalchemy import text, inspect
+        inspector = inspect(engine)
+        
+        try:
+            # Use quoted table name for reserved keyword "user"
+            columns = [col['name'] for col in inspector.get_columns('user')]
+            if 'is_verified' not in columns:
+                with Session(engine) as session:
+                    # Quote table name to handle reserved keyword
+                    session.execute(text(
+                        'ALTER TABLE "user" ADD COLUMN is_verified BOOLEAN NOT NULL DEFAULT FALSE'
+                    ))
+                    session.commit()
+                    logger.info("Successfully added is_verified column to user table")
+                    print("[OK] Added is_verified column to user table")
+            else:
+                logger.info("is_verified column already exists in user table")
+                print("[OK] is_verified column already exists in user table")
+        except Exception as e:
+            logger.error(f"Failed to add is_verified column to user: {e}")
+            print(f"Warning: Could not add is_verified column to user: {e}")
+    except Exception as e:
+        logger.error(f"Failed to run is_verified migration: {e}")
+        print(f"Warning: Could not run is_verified migration: {e}")
+
+
 def auto_migrate_model_schema():
     """
     Auto-migration: Compare SQLModel definitions with database schema and add missing columns.
@@ -165,19 +195,33 @@ def auto_migrate_model_schema():
                 nullable = "NULL" if col_def.nullable else "NOT NULL"
                 default = ""
                 
+                # Handle default values
                 if col_def.default is not None:
                     if hasattr(col_def.default, 'arg'):
                         default_val = col_def.default.arg
-                        if isinstance(default_val, (int, float)):
+                        if isinstance(default_val, bool):
+                            default = f"DEFAULT {str(default_val).upper()}"
+                        elif isinstance(default_val, (int, float)):
                             default = f"DEFAULT {default_val}"
                         elif isinstance(default_val, str):
                             default = f"DEFAULT '{default_val}'"
                     elif col_def.default is None and col_def.nullable:
                         default = "DEFAULT NULL"
+                # Also check if Field has a default (for SQLModel fields)
+                elif not col_def.nullable:
+                    # For NOT NULL columns without explicit default, try to infer from model
+                    # This handles cases where Field(default=...) is used
+                    try:
+                        # Check if this is a Boolean field that should default to False
+                        if isinstance(col_def.type, Boolean) and not col_def.nullable:
+                            default = "DEFAULT FALSE"
+                    except:
+                        pass
                 
                 try:
                     with Session(engine) as session:
-                        alter_sql = f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_type} {nullable} {default}".strip()
+                        # Quote table name to handle reserved keywords like "user"
+                        alter_sql = f'ALTER TABLE "{table_name}" ADD COLUMN {col_name} {col_type} {nullable} {default}'.strip()
                         session.execute(text(alter_sql))
                         session.commit()
                         migrations_applied.append(f"{table_name}.{col_name}")
