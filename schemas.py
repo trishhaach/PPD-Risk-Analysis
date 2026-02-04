@@ -998,7 +998,8 @@ class EPDSResultItemSchema(BaseModel):
 
 
 class EPDSHistoryResponseSchema(BaseModel):
-    results: List[EPDSResultItemSchema]
+    history: List[EPDSResultItemSchema]
+    count: int
 
 
 class EPDSResultDetailSchema(BaseModel):
@@ -1025,18 +1026,31 @@ class ScreeningCountResponseSchema(BaseModel):
     total_screening_count: int
 
 
+class HybridScreeningAuditSchema(BaseModel):
+    timestamp: str
+    decision_path: List[str]
+    is_discordant: bool
+    uncertainty_flag: bool
+
+
 class HybridScreeningHistoryItemSchema(BaseModel):
     id: str
-    epds_total: int
-    ml_probability: float
     risk_label: str
     final_probability: float
+    is_critical: bool
+    clinical_recommendation: str
+    epds_total_score: int
+    epds_risk_level: str
+    fusion_method: str
     explanation: str
+    metrics: Dict[str, Any]
+    audit: HybridScreeningAuditSchema
     created_at: str
 
 
 class HybridScreeningHistoryResponseSchema(BaseModel):
-    results: List[HybridScreeningHistoryItemSchema]
+    history: List[HybridScreeningHistoryItemSchema]
+    count: int
 
 
 class HybridScreeningResultResponseSchema(BaseModel):
