@@ -4,7 +4,7 @@ import hashlib
 import logging
 import os
 import uuid
-from typing import Optional, List
+from typing import Optional, List, Any
 
 from dotenv import load_dotenv
 import smtplib
