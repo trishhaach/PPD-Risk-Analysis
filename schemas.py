@@ -1,6 +1,6 @@
 from pydantic import BaseModel, EmailStr, field_validator, Field
 from pydantic.config import ConfigDict
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 
 
 class SignupSchema(BaseModel):
