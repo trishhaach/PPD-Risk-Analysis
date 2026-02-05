@@ -1245,21 +1245,34 @@ def get_epds_history(current_user: User = Depends(get_current_user)):
     """
     try:
         with Session(engine) as session:
-            results = session.query(EPDSResult).filter(
-                EPDSResult.user_id == current_user.id
-            ).order_by(EPDSResult.created_at.desc()).all()
-            
-            return {
-                "history": [
+            results = (
+                session.query(EPDSResult)
+                .filter(EPDSResult.user_id == current_user.id)
+                .order_by(EPDSResult.created_at.desc())
+                .all()
+            )
+
+            history_items = []
+            for result in results:
+                # Be defensive against older rows that might have NULLs
+                total_score = result.total_score if result.total_score is not None else 0
+                risk_level = result.risk_level if result.risk_level is not None else ""
+                created_at = (
+                    result.created_at.isoformat() if result.created_at else ""
+                )
+
+                history_items.append(
                     {
                         "id": result.id,
-                        "total_score": result.total_score,
-                        "risk_level": result.risk_level,
-                        "created_at": result.created_at.isoformat()
+                        "total_score": total_score,
+                        "risk_level": risk_level,
+                        "created_at": created_at,
                     }
-                    for result in results
-                ],
-                "count": len(results)
+                )
+
+            return {
+                "history": history_items,
+                "count": len(history_items),
             }
     except Exception as e:
         logger.error(f"Error fetching EPDS history: {str(e)}", exc_info=True)
@@ -1278,9 +1291,12 @@ def get_hybrid_screening_history(current_user: User = Depends(get_current_user))
         
         with Session(engine) as session:
             # Get all EPDS results for the user, ordered by most recent
-            epds_results = session.query(EPDSResult).filter(
-                EPDSResult.user_id == current_user.id
-            ).order_by(EPDSResult.created_at.desc()).all()
+            epds_results = (
+                session.query(EPDSResult)
+                .filter(EPDSResult.user_id == current_user.id)
+                .order_by(EPDSResult.created_at.desc())
+                .all()
+            )
             
             history = []
             
@@ -1322,14 +1338,25 @@ def get_hybrid_screening_history(current_user: User = Depends(get_current_user))
                         elif result.risk_label.value == "Low":
                             recommendation = "Routine postpartum care."
                         
+                        # Be defensive against NULLs from older EPDS rows
+                        epds_total_score = (
+                            epds.total_score if epds.total_score is not None else 0
+                        )
+                        epds_risk_level = (
+                            epds.risk_level if epds.risk_level is not None else ""
+                        )
+                        created_at = (
+                            epds.created_at.isoformat() if epds.created_at else ""
+                        )
+
                         history.append({
                             "id": epds.id,
                             "risk_label": result.risk_label.value,
                             "final_probability": result.final_probability,
                             "is_critical": (result.risk_label.value == "Critical"),
                             "clinical_recommendation": recommendation,
-                            "epds_total_score": epds.total_score,
-                            "epds_risk_level": epds.risk_level,
+                            "epds_total_score": epds_total_score,
+                            "epds_risk_level": epds_risk_level,
                             "fusion_method": result.fusion_method,
                             "explanation": result.explanation,
                             "metrics": result.detailed_metrics,
@@ -1339,7 +1366,7 @@ def get_hybrid_screening_history(current_user: User = Depends(get_current_user))
                                 "is_discordant": result.audit_record.is_discordant,
                                 "uncertainty_flag": result.audit_record.uncertainty_flag
                             },
-                            "created_at": epds.created_at.isoformat()
+                            "created_at": created_at
                         })
                     except (ValueError, KeyError, json.JSONDecodeError) as e:
                         # Skip this entry if we can't process it
