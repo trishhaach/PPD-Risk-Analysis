@@ -51,6 +51,25 @@ class PPDRiskAssessment(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
 
 
+class ArticleRecommendation(SQLModel, table=True):
+    """
+    Stores article recommendation results per user and screening.
+    This powers both the immediate screening response and the dashboard view.
+    """
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", nullable=False)
+    screening_type: str = Field(sa_column=Column(String(20), nullable=False))  # "epds" or "hybrid"
+    screening_id: Optional[int] = Field(default=None, sa_column=Column(Integer, nullable=True))
+    risk_level: str = Field(sa_column=Column(String(20), nullable=False))
+    symptoms_text_used: str = Field(sa_column=Column(Text, nullable=False))
+    recommended_articles_json: str = Field(sa_column=Column(Text, nullable=False))
+    status: str = Field(
+        default="unavailable",
+        sa_column=Column(String(20), nullable=False),
+    )  # "ok" or "unavailable"
+    created_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
+
+
 class Blog(SQLModel, table=True):
     """Model to store blog posts"""
     id: Optional[int] = Field(default=None, primary_key=True)

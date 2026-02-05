@@ -44,6 +44,7 @@ from models import (
     User,
     EPDSResult,
     PPDRiskAssessment,
+    ArticleRecommendation,
     Blog,
     Category,
     CommunityPost,
@@ -149,6 +150,9 @@ from schemas import (
     EPDSAnswersSchema,
     EPDSResultDataSchema,
     EPDSSubmitResponseSchema,
+    HybridScreeningSubmitResponseSchema,
+    RecommendedArticleSchema,
+    RecommendedArticlesDashboardResponseSchema,
 )
 
 # Logging is already set up above (before Supabase import)
@@ -166,11 +170,17 @@ ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 600  # 10 hours
 PASSWORD_SALT = os.getenv("SAKHI_PASSWORD_SALT", "dev-salt-change-me")
 
-# ==================== ML (PPD Risk Assessment) Configuration ====================
+# ==================== ML (PPD Risk Assessment & Article Recommendation) Configuration ====================
 # Base URL for the external ML service (FastAPI hosted on HuggingFace Space)
 PPD_ML_BASE_URL = os.getenv("PPD_ML_BASE_URL", "https://appledog00-ppd-risk-api.hf.space").rstrip("/")
 # Optional: set this to skip discovery and directly call the ML POST endpoint
 PPD_ML_PREDICT_URL = os.getenv("PPD_ML_PREDICT_URL")  # full URL e.g. https://.../predict
+
+# Base URL for the external article recommendation service
+ARTICLE_RECO_BASE_URL = os.getenv(
+    "ARTICLE_RECO_BASE_URL",
+    "https://appledog00-ppd-recommendation-api.hf.space",
+).rstrip("/")
 
 # Cache discovered predict URL to avoid fetching openapi.json on every request
 _ppd_ml_predict_url_cache: Optional[str] = None
@@ -957,6 +967,183 @@ def calculate_epds_score(answers: EPDSAnswerSchema) -> tuple[int, str]:
     return total, risk_level
 
 
+def _map_risk_level_for_ml(app_risk_level: str) -> str:
+    """
+    Map Sakhi risk labels to the exact labels expected by the ML recommendation service.
+    This centralizes the mapping so it can be easily updated if the ML API changes.
+    """
+    if not app_risk_level:
+        return ""
+
+    normalized = str(app_risk_level).strip().lower()
+
+    # Adjust this mapping if the ML Swagger specifies different allowed values.
+    mapping = {
+        "low": "low",
+        "moderate": "moderate",
+        "medium": "moderate",
+        "high": "high",
+        "critical": "high",  # Map Critical screenings to the ML's highest bucket
+    }
+
+    return mapping.get(normalized, normalized)
+
+
+def _map_recommendation_item(raw: dict, fallback_risk_level: str) -> Optional[dict]:
+    """
+    Map a single raw recommendation item from the ML service into our unified shape.
+    This is defensive to handle minor schema changes on the ML side without breaking our API.
+    """
+    if not isinstance(raw, dict):
+        return None
+
+    article_id = str(
+        raw.get("article_id")
+        or raw.get("id")
+        or raw.get("articleId")
+        or raw.get("uid")
+        or ""
+    ).strip()
+    if not article_id:
+        return None
+
+    title = str(raw.get("title") or "").strip()
+    category = str(raw.get("category") or raw.get("topic") or "").strip()
+    risk_level = str(
+        raw.get("risk_level") or raw.get("riskLevel") or fallback_risk_level
+    ).strip()
+    external_url = str(
+        raw.get("external_url") or raw.get("url") or raw.get("link") or ""
+    ).strip()
+
+    # Do NOT hardcode "External Link"; if the ML service provides an access type,
+    # pass it through, otherwise leave it empty.
+    access_type_value = (
+        raw.get("access_type")
+        or raw.get("accessType")
+        or raw.get("type")
+        or ""
+    )
+    access_type = str(access_type_value).strip() if access_type_value is not None else ""
+
+    score_val = raw.get("score")
+    if score_val is None:
+        score_val = raw.get("similarity") or raw.get("relevance") or 0.0
+    try:
+        score = float(score_val)
+    except (TypeError, ValueError):
+        score = 0.0
+
+    return {
+        "article_id": article_id,
+        "title": title,
+        "category": category,
+        "risk_level": risk_level,
+        "external_url": external_url,
+        "access_type": access_type,
+        "score": score,
+    }
+
+
+def _extract_recommendations_from_response(data: Any, fallback_risk_level: str) -> List[dict]:
+    """
+    Extract list of recommendation items from the ML service response.
+    Supports a few common shapes defensively: list, {'recommendations': [...]}, {'articles': [...]}, etc.
+    """
+    items: List[Any] = []
+
+    if isinstance(data, list):
+        items = data
+    elif isinstance(data, dict):
+        # Primary shape from ML Swagger: {"recommendations": [...]}
+        if "recommendations" in data and isinstance(data["recommendations"], list):
+            items = data["recommendations"]
+        else:
+            # Backward-compatible fallbacks in case the service wraps data differently.
+            for key in ("articles", "items", "results"):
+                if key in data and isinstance(data[key], list):
+                    items = data[key]
+                    break
+
+    if not items:
+        return []
+
+    mapped: List[dict] = []
+    for raw in items:
+        mapped_item = _map_recommendation_item(raw, fallback_risk_level)
+        if mapped_item is not None:
+            mapped.append(mapped_item)
+    return mapped
+
+
+def _fetch_and_store_article_recommendations(
+    *,
+    user_id: int,
+    screening_type: str,
+    screening_id: Optional[int],
+    risk_level: str,
+    symptoms_text: str,
+    top_n: int = 5,
+) -> tuple[List[dict], str]:
+    """
+    Call the external article recommendation service and persist the results.
+    Returns (recommended_articles, status) for API responses.
+    Always persists a row (even on ML failure) so the dashboard never shows stale data.
+    """
+    if not ARTICLE_RECO_BASE_URL:
+        # Still persist an "unavailable" record with no articles so the dashboard
+        # does not accidentally show older recommendations.
+        recommended_articles: List[dict] = []
+        status = "unavailable"
+    else:
+        recommended_articles = []
+        status = "ok"
+        try:
+            payload = {
+                # Use the exact field names from the ML Swagger for POST /api/recommend.
+                "risk_level": _map_risk_level_for_ml(risk_level),
+                "symptoms_text": symptoms_text,
+                "top_n": top_n,
+            }
+            url = f"{ARTICLE_RECO_BASE_URL}/api/recommend"
+            resp = httpx.post(url, json=payload, timeout=5)
+            resp.raise_for_status()
+            data = resp.json()
+            recommended_articles = _extract_recommendations_from_response(
+                data, risk_level
+            )
+        except Exception as e:
+            logger.error(
+                f"Error calling article recommendation service: {str(e)}",
+                exc_info=True,
+            )
+            recommended_articles = []
+            status = "unavailable"
+
+    # Persist recommendations; failures here should not break the main flow.
+    # We always persist a row, even if recommended_articles is empty.
+    try:
+        with Session(engine) as session:
+            record = ArticleRecommendation(
+                user_id=user_id,
+                screening_type=screening_type,
+                screening_id=screening_id,
+                risk_level=risk_level,
+                symptoms_text_used=symptoms_text,
+                recommended_articles_json=json.dumps(recommended_articles),
+                status=status,
+                created_at=datetime.utcnow(),
+            )
+            session.add(record)
+            session.commit()
+    except Exception as e:
+        logger.error(
+            f"Error saving article recommendations: {str(e)}", exc_info=True
+        )
+
+    return recommended_articles, status
+
+
 @app.post("/epds-screen", response_model=EPDSSubmitResponseSchema)
 def submit_epds_screening(
     answers: EPDSAnswerSchema,
@@ -994,33 +1181,56 @@ def submit_epds_screening(
             session.add(epds_result)
             session.commit()
             session.refresh(epds_result)
-            
-            return {
-                "message": "EPDS screening completed successfully",
-                "result": {
-                    "id": epds_result.id,
-                    "total_score": total_score,
-                    "risk_level": risk_level,
-                    "answers": {
-                        "q1": answers.q1,
-                        "q2": answers.q2,
-                        "q3": answers.q3,
-                        "q4": answers.q4,
-                        "q5": answers.q5,
-                        "q6": answers.q6,
-                        "q7": answers.q7,
-                        "q8": answers.q8,
-                        "q9": answers.q9,
-                        "q10": answers.q10,
-                    },
-                    "created_at": epds_result.created_at.isoformat()
+
+        # Build symptoms_text for recommendation service (simple summary based on EPDS)
+        symptoms_text = f"EPDS total score {total_score}, risk level {risk_level}."
+
+        # Call article recommendation service (non-blocking for main logic)
+        try:
+            recommended_articles, recommendations_status = _fetch_and_store_article_recommendations(
+                user_id=current_user.id,
+                screening_type="epds",
+                screening_id=epds_result.id,
+                risk_level=risk_level,
+                symptoms_text=symptoms_text,
+                top_n=5,
+            )
+        except Exception as e:
+            logger.error(
+                f"Error generating EPDS article recommendations: {str(e)}",
+                exc_info=True,
+            )
+            recommended_articles = []
+            recommendations_status = "unavailable"
+
+        return {
+            "message": "EPDS screening completed successfully",
+            "result": {
+                "id": epds_result.id,
+                "total_score": total_score,
+                "risk_level": risk_level,
+                "answers": {
+                    "q1": answers.q1,
+                    "q2": answers.q2,
+                    "q3": answers.q3,
+                    "q4": answers.q4,
+                    "q5": answers.q5,
+                    "q6": answers.q6,
+                    "q7": answers.q7,
+                    "q8": answers.q8,
+                    "q9": answers.q9,
+                    "q10": answers.q10,
                 },
-                "interpretation": {
-                    "low": "Score 0-9: Low risk of postpartum depression",
-                    "moderate": "Score 10-12: Moderate risk - consider monitoring or support",
-                    "high": "Score 13-30: High risk - please consult with a healthcare provider"
-                }[risk_level]
-            }
+                "created_at": epds_result.created_at.isoformat()
+            },
+            "interpretation": {
+                "low": "Score 0-9: Low risk of postpartum depression",
+                "moderate": "Score 10-12: Moderate risk - consider monitoring or support",
+                "high": "Score 13-30: High risk - please consult with a healthcare provider"
+            }[risk_level],
+            "recommended_articles": recommended_articles,
+            "recommendations_status": recommendations_status,
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -1477,6 +1687,52 @@ def get_ppd_risk_result(
         raise HTTPException(status_code=503, detail=f"Error fetching PPD risk result: {str(e)}")
 
 
+@app.get("/me/recommended-articles", response_model=RecommendedArticlesDashboardResponseSchema)
+def get_my_recommended_articles(current_user: User = Depends(get_current_user)):
+    """
+    Get the latest article recommendations for the logged-in user.
+    This powers the dashboard, showing the same list that was returned after the latest screening.
+    """
+    try:
+        with Session(engine) as session:
+            record = (
+                session.query(ArticleRecommendation)
+                .filter(ArticleRecommendation.user_id == current_user.id)
+                .order_by(ArticleRecommendation.created_at.desc())
+                .first()
+            )
+
+            if not record:
+                return {
+                    "recommended_articles": [],
+                    "source_screening_type": None,
+                    "generated_at": None,
+                    "status": None,
+                }
+
+            try:
+                articles = (
+                    json.loads(record.recommended_articles_json)
+                    if record.recommended_articles_json
+                    else []
+                )
+            except json.JSONDecodeError:
+                articles = []
+
+            return {
+                "recommended_articles": articles,
+                "source_screening_type": record.screening_type,
+                "generated_at": record.created_at.isoformat(),
+                "status": record.status,
+            }
+    except Exception as e:
+        logger.error(f"Error fetching recommended articles for user: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=503,
+            detail=f"Error fetching recommended articles: {str(e)}",
+        )
+
+
 def _extract_ml_probability(ml_result: dict) -> float:
     """
     Extract raw probability from ML service response.
@@ -1515,7 +1771,7 @@ def _extract_ml_probability(ml_result: dict) -> float:
     raise ValueError(f"Could not extract probability from ML response. Available keys: {list(ml_result.keys())}")
 
 
-@app.post("/screening/hybrid")
+@app.post("/screening/hybrid", response_model=HybridScreeningSubmitResponseSchema)
 def perform_hybrid_screening(
     request: HybridScreeningRequestSchema,
     current_user: User = Depends(get_current_user)
@@ -1638,7 +1894,32 @@ def perform_hybrid_screening(
             )
             session.add(ppd_record)
             session.commit()
-        
+
+        # Build symptoms_text from symptom questionnaire answers for recommendations
+        symptoms_parts: List[str] = []
+        for k, v in symptom_payload.items():
+            if isinstance(v, str):
+                symptoms_parts.append(f"{k}: {v}")
+        symptoms_text = "; ".join(symptoms_parts) or f"Hybrid screening risk level {result.risk_label.value}"
+
+        # Call article recommendation service (non-blocking for main logic)
+        try:
+            recommended_articles, recommendations_status = _fetch_and_store_article_recommendations(
+                user_id=current_user.id,
+                screening_type="hybrid",
+                screening_id=epds_result.id,
+                risk_level=result.risk_label.value,
+                symptoms_text=symptoms_text,
+                top_n=5,
+            )
+        except Exception as e:
+            logger.error(
+                f"Error generating hybrid article recommendations: {str(e)}",
+                exc_info=True,
+            )
+            recommended_articles = []
+            recommendations_status = "unavailable"
+
         # Step 5: Return hybrid result
         from hybrid import RiskLevel
         return {
@@ -1655,7 +1936,9 @@ def perform_hybrid_screening(
                 "is_discordant": result.audit_record.is_discordant,
                 "uncertainty_flag": result.audit_record.uncertainty_flag
             },
-            "system_disclaimer": "Screening aid only. Consult clinical guidelines."
+            "system_disclaimer": "Screening aid only. Consult clinical guidelines.",
+            "recommended_articles": recommended_articles,
+            "recommendations_status": recommendations_status,
         }
         
     except HTTPException:

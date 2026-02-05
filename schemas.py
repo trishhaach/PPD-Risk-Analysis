@@ -719,7 +719,10 @@ class PPDResultDetailSchema(BaseModel):
 
 
 class HybridScreeningSubmitResponseSchema(BaseModel):
-    id: int
+    """
+    Response schema for POST /screening/hybrid (immediate hybrid screening result).
+    Matches the actual return structure from perform_hybrid_screening.
+    """
     risk_label: str
     final_probability: float
     is_critical: bool
@@ -728,10 +731,14 @@ class HybridScreeningSubmitResponseSchema(BaseModel):
     fusion_method: str
     metrics: dict
     audit: dict
-    epds_data: dict
-    ppd_data: dict
-    created_at: str
     system_disclaimer: str
+    recommended_articles: List["RecommendedArticleSchema"] = Field(
+        default_factory=list,
+        description="List of recommended articles based on this hybrid screening",
+    )
+    recommendations_status: str = Field(
+        description="Status of recommendation generation: 'ok' or 'unavailable'",
+    )
 
 
 class CreatePostResponseSchema(BaseModel):
@@ -1113,4 +1120,28 @@ class EPDSSubmitResponseSchema(BaseModel):
     message: str
     result: EPDSResultDataSchema
     interpretation: str
+    recommended_articles: List["RecommendedArticleSchema"] = Field(
+        default_factory=list,
+        description="List of recommended articles based on this screening"
+    )
+    recommendations_status: str = Field(
+        description="Status of recommendation generation: 'ok' or 'unavailable'"
+    )
+
+
+class RecommendedArticleSchema(BaseModel):
+    article_id: str
+    title: str
+    category: str
+    risk_level: str
+    external_url: str
+    access_type: str
+    score: float
+
+
+class RecommendedArticlesDashboardResponseSchema(BaseModel):
+    recommended_articles: List[RecommendedArticleSchema]
+    source_screening_type: Optional[str] = None
+    generated_at: Optional[str] = None
+    status: Optional[str] = None
 
