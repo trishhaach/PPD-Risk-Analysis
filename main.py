@@ -1349,6 +1349,17 @@ def get_hybrid_screening_history(current_user: User = Depends(get_current_user))
                             epds.created_at.isoformat() if epds.created_at else ""
                         )
 
+                        # Normalize decision_path to always be a list of strings
+                        raw_decision_path = result.audit_record.decision_path
+                        if isinstance(raw_decision_path, str):
+                            decision_path = [raw_decision_path]
+                        elif isinstance(raw_decision_path, list):
+                            decision_path = [str(step) for step in raw_decision_path]
+                        elif raw_decision_path is None:
+                            decision_path = []
+                        else:
+                            decision_path = [str(raw_decision_path)]
+
                         history.append({
                             "id": str(epds.id),
                             "risk_label": result.risk_label.value,
@@ -1362,7 +1373,7 @@ def get_hybrid_screening_history(current_user: User = Depends(get_current_user))
                             "metrics": result.detailed_metrics,
                             "audit": {
                                 "timestamp": result.audit_record.timestamp,
-                                "decision_path": result.audit_record.decision_path,
+                                "decision_path": decision_path,
                                 "is_discordant": result.audit_record.is_discordant,
                                 "uncertainty_flag": result.audit_record.uncertainty_flag
                             },
@@ -1545,6 +1556,18 @@ def get_hybrid_result(result_id: int, current_user: User = Depends(get_current_u
                 recommendation = "Routine postpartum care."
             
             from hybrid import RiskLevel
+
+            # Normalize decision_path to always be a list of strings
+            raw_decision_path = result.audit_record.decision_path
+            if isinstance(raw_decision_path, str):
+                decision_path = [raw_decision_path]
+            elif isinstance(raw_decision_path, list):
+                decision_path = [str(step) for step in raw_decision_path]
+            elif raw_decision_path is None:
+                decision_path = []
+            else:
+                decision_path = [str(raw_decision_path)]
+
             return {
                 "id": result_id,
                 "risk_label": result.risk_label.value,
@@ -1556,7 +1579,7 @@ def get_hybrid_result(result_id: int, current_user: User = Depends(get_current_u
                 "metrics": result.detailed_metrics,
                 "audit": {
                     "timestamp": result.audit_record.timestamp,
-                    "decision_path": result.audit_record.decision_path,
+                    "decision_path": decision_path,
                     "is_discordant": result.audit_record.is_discordant,
                     "uncertainty_flag": result.audit_record.uncertainty_flag
                 },
@@ -1949,6 +1972,18 @@ def perform_hybrid_screening(
 
         # Step 5: Return hybrid result
         from hybrid import RiskLevel
+
+        # Normalize decision_path to always be a list of strings
+        raw_decision_path = result.audit_record.decision_path
+        if isinstance(raw_decision_path, str):
+            decision_path = [raw_decision_path]
+        elif isinstance(raw_decision_path, list):
+            decision_path = [str(step) for step in raw_decision_path]
+        elif raw_decision_path is None:
+            decision_path = []
+        else:
+            decision_path = [str(raw_decision_path)]
+
         return {
             "risk_label": result.risk_label.value,
             "final_probability": result.final_probability,
@@ -1959,7 +1994,7 @@ def perform_hybrid_screening(
             "metrics": result.detailed_metrics,
             "audit": {
                 "timestamp": result.audit_record.timestamp,
-                "decision_path": result.audit_record.decision_path,
+                "decision_path": decision_path,
                 "is_discordant": result.audit_record.is_discordant,
                 "uncertainty_flag": result.audit_record.uncertainty_flag
             },
