@@ -1203,6 +1203,9 @@ def submit_epds_screening(
             recommended_articles = []
             recommendations_status = "unavailable"
 
+        # For result page: show at most 2, while dashboard keeps all 5 from storage
+        limited_recommended_articles = recommended_articles[:2] if recommended_articles else []
+
         return {
             "message": "EPDS screening completed successfully",
             "result": {
@@ -1228,7 +1231,7 @@ def submit_epds_screening(
                 "moderate": "Score 10-12: Moderate risk - consider monitoring or support",
                 "high": "Score 13-30: High risk - please consult with a healthcare provider"
             }[risk_level],
-            "recommended_articles": recommended_articles,
+            "recommended_articles": limited_recommended_articles,
             "recommendations_status": recommendations_status,
         }
     except HTTPException:
@@ -1967,8 +1970,11 @@ def perform_hybrid_screening(
                 f"Error generating hybrid article recommendations: {str(e)}",
                 exc_info=True,
             )
-            recommended_articles = []
+            recommended_articles = [],
             recommendations_status = "unavailable"
+
+        # For result page: show at most 2, while dashboard keeps all 5 from storage
+        limited_recommended_articles = recommended_articles[:2] if recommended_articles else []
 
         # Step 5: Return hybrid result
         from hybrid import RiskLevel
@@ -1999,7 +2005,7 @@ def perform_hybrid_screening(
                 "uncertainty_flag": result.audit_record.uncertainty_flag
             },
             "system_disclaimer": "Screening aid only. Consult clinical guidelines.",
-            "recommended_articles": recommended_articles,
+            "recommended_articles": limited_recommended_articles,
             "recommendations_status": recommendations_status,
         }
         
