@@ -1263,7 +1263,7 @@ def get_epds_history(current_user: User = Depends(get_current_user)):
 
                 history_items.append(
                     {
-                        "id": result.id,
+                        "id": str(result.id),
                         "total_score": total_score,
                         "risk_level": risk_level,
                         "created_at": created_at,
@@ -1350,7 +1350,7 @@ def get_hybrid_screening_history(current_user: User = Depends(get_current_user))
                         )
 
                         history.append({
-                            "id": epds.id,
+                            "id": str(epds.id),
                             "risk_label": result.risk_label.value,
                             "final_probability": result.final_probability,
                             "is_critical": (result.risk_label.value == "Critical"),
