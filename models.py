@@ -34,6 +34,12 @@ class EPDSResult(SQLModel, table=True):
     total_score: int = Field(sa_column=Column(Integer, nullable=False))
     risk_level: str = Field(sa_column=Column(String(20), nullable=False))  # low, moderate, high
     
+    # Crisis resources
+    recommended_resource_ids: Optional[List[str]] = Field(
+        default=None,
+        sa_column=Column(ARRAY(String), nullable=True)
+    )
+    
     # Timestamp
     created_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
 
@@ -48,6 +54,10 @@ class PPDRiskAssessment(SQLModel, table=True):
     ml_endpoint: Optional[str] = Field(default=None, sa_column=Column(String(500), nullable=True))
     answers_json: str = Field(sa_column=Column(Text, nullable=False))  # JSON string
     ml_response_json: str = Field(sa_column=Column(Text, nullable=False))  # JSON string
+    recommended_resource_ids: Optional[List[str]] = Field(
+        default=None,
+        sa_column=Column(ARRAY(String), nullable=True)
+    )
     created_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
 
 
@@ -58,7 +68,7 @@ class ArticleRecommendation(SQLModel, table=True):
     """
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="user.id", nullable=False)
-    screening_type: str = Field(sa_column=Column(String(20), nullable=False))  # "epds" or "hybrid"
+    screening_type: str = Field(sa_column=Column(String(20), nullable=False))  # "epds", "hybrid", or "ppd"
     screening_id: Optional[int] = Field(default=None, sa_column=Column(Integer, nullable=True))
     risk_level: str = Field(sa_column=Column(String(20), nullable=False))
     symptoms_text_used: str = Field(sa_column=Column(Text, nullable=False))

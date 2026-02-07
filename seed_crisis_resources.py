@@ -23,6 +23,29 @@ def normalize_type(type_str: str) -> str:
     return type_mapping.get(normalized, normalized.replace(" ", "_").lower())
 
 
+def get_risk_supported_for_type(resource_type: str) -> list:
+    """
+    Determine risk_supported values based on resource type.
+    
+    Args:
+        resource_type: Normalized resource type (helpline, hospital, emergency, counseling, wellness, etc.)
+    
+    Returns:
+        List of risk levels this resource type supports
+    """
+    type_to_risks = {
+        "wellness": ["LOW"],
+        "counseling": ["MEDIUM", "HIGH", "CRITICAL"],
+        "helpline": ["HIGH", "CRITICAL"],
+        "hospital": ["HIGH", "CRITICAL"],
+        "emergency": ["CRITICAL"],
+        "community_support": ["LOW", "MEDIUM"],
+    }
+    
+    # Default: if type not found, support all risk levels
+    return type_to_risks.get(resource_type, ["LOW", "MEDIUM", "HIGH", "CRITICAL"])
+
+
 def seed():
     """Seed crisis resources from JSON file."""
     json_path = os.path.join(os.path.dirname(__file__), "data", "crisis_resources_seed.json")
@@ -58,10 +81,14 @@ def seed():
             normalized_type = normalize_type(record.get("type", ""))
             
             # Create CrisisResource object
-            # Handle risk_supported - default to empty list if not in JSON
+            # Handle risk_supported - use from JSON if provided, otherwise derive from type
             risk_supported = record.get("risk_supported", [])
             if not isinstance(risk_supported, list):
                 risk_supported = []
+            
+            # If risk_supported is empty, populate it based on resource type
+            if not risk_supported:
+                risk_supported = get_risk_supported_for_type(normalized_type)
             
             # Handle None values for lat/lng
             lat = record.get("lat")

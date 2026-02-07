@@ -167,7 +167,8 @@ def auto_migrate_model_schema():
                 
                 # Build ALTER TABLE statement
                 # Get column type - convert to PostgreSQL compatible types
-                from sqlalchemy import DateTime, Integer, String, Text, Boolean
+                from sqlalchemy import DateTime, Integer, String, Text, Boolean, ARRAY
+                from sqlalchemy.dialects.postgresql import ARRAY as PG_ARRAY
                 
                 col_type_str = str(col_def.type)
                 # Map SQLAlchemy types to PostgreSQL types
@@ -185,10 +186,27 @@ def auto_migrate_model_schema():
                     col_type = "TEXT"
                 elif isinstance(col_def.type, Boolean):
                     col_type = "BOOLEAN"
+                elif isinstance(col_def.type, (ARRAY, PG_ARRAY)):
+                    # Handle PostgreSQL ARRAY type - convert to text[] syntax
+                    # Check if it has item_type attribute
+                    if hasattr(col_def.type, 'item_type'):
+                        item_type = col_def.type.item_type
+                        if isinstance(item_type, String):
+                            col_type = "text[]"
+                        elif isinstance(item_type, Integer):
+                            col_type = "integer[]"
+                        else:
+                            col_type = "text[]"  # Default to text[] for other types
+                    else:
+                        # Fallback: assume text array
+                        col_type = "text[]"
                 else:
-                    # Fallback: try to convert DATETIME to TIMESTAMP
+                    # Fallback: try to convert DATETIME to TIMESTAMP or detect ARRAY
                     if "DATETIME" in col_type_str.upper():
                         col_type = "TIMESTAMP"
+                    elif "ARRAY" in col_type_str.upper():
+                        # Fallback for ARRAY types not recognized above
+                        col_type = "text[]"
                     else:
                         col_type = col_type_str
                 

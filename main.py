@@ -37,12 +37,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from sqlmodel import Session
+from sqlalchemy.dialects.postgresql import array
 
 from database import init_db, engine
 from hybrid import HybridScreener
 from crisis_resources import risk_to_allowed_types, haversine_distance
-from utils.risk_mapping import epds_to_risk_level, hybrid_to_risk_level
-from services.crisis_resources_service import get_recommended_crisis_resources
+from utils.risk_mapping import epds_to_risk_level, hybrid_to_risk_level, ml_probability_to_risk_level, ML_CRITICAL_THRESHOLD
+from services.crisis_resources_service import get_recommended_crisis_resources, get_resources_by_ids
 from models import (
     User,
     EPDSResult,
@@ -1150,7 +1151,124 @@ def _fetch_and_store_article_recommendations(
     return recommended_articles, status
 
 
-@app.post("/epds-screen", response_model=EPDSSubmitResponseSchema)
+def _fetch_stored_article_recommendations(
+    session: Session,
+    user_id: int,
+    screening_type: str,
+    screening_id: Optional[int],
+) -> tuple[List[dict], str]:
+    """
+    Fetch stored article recommendations from the database for a specific screening.
+    Returns (articles_list, status) where articles_list is limited to 2 for result page.
+    Used by partner APIs to read stored recommendations without calling ML service.
+    """
+    try:
+        # Query for the latest matching recommendation record
+        query = session.query(ArticleRecommendation).filter(
+            ArticleRecommendation.user_id == user_id,
+            ArticleRecommendation.screening_type == screening_type,
+        )
+        
+        if screening_id is not None:
+            query = query.filter(ArticleRecommendation.screening_id == screening_id)
+        
+        record = query.order_by(ArticleRecommendation.created_at.desc()).first()
+        
+        if not record:
+            return [], "unavailable"
+        
+        # Parse stored articles JSON
+        try:
+            articles = (
+                json.loads(record.recommended_articles_json)
+                if record.recommended_articles_json
+                else []
+            )
+        except json.JSONDecodeError:
+            articles = []
+        
+        # Limit to 2 for result page (same as EPDS/Hybrid/Symptom endpoints)
+        limited_articles = articles[:2] if articles else []
+        
+        return limited_articles, record.status
+    except Exception as e:
+        logger.error(
+            f"Error fetching stored article recommendations: {str(e)}",
+            exc_info=True,
+        )
+        return [], "unavailable"
+
+
+@app.post(
+    "/epds-screen",
+    response_model=EPDSSubmitResponseSchema,
+    responses={
+        200: {
+            "description": "EPDS screening result with optional crisis resources",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "id": 123,
+                        "total_score": 15,
+                        "risk_level": "High",
+                        "risk_level_standard": "HIGH",
+                        "answers": {
+                            "q1": 2,
+                            "q2": 1,
+                            "q3": 3,
+                            "q4": 2,
+                            "q5": 1,
+                            "q6": 2,
+                            "q7": 1,
+                            "q8": 1,
+                            "q9": 1,
+                            "q10": 1
+                        },
+                        "created_at": "2026-02-07T10:30:00",
+                        "recommended_articles": [
+                            {
+                                "article_id": "art_001",
+                                "title": "Understanding Postpartum Depression",
+                                "category": "Mental Health",
+                                "risk_level": "high",
+                                "external_url": "https://example.com/article1",
+                                "access_type": "External Link",
+                                "score": 0.95
+                            },
+                            {
+                                "article_id": "art_002",
+                                "title": "Coping Strategies for New Mothers",
+                                "category": "Wellness",
+                                "risk_level": "high",
+                                "external_url": "https://example.com/article2",
+                                "access_type": "External Link",
+                                "score": 0.88
+                            }
+                        ],
+                        "recommendations_status": "ok",
+                        "crisis_resources": [
+                            {
+                                "id": "CR001",
+                                "name": "TPO Nepal Helpline",
+                                "type": "helpline",
+                                "city": "Kathmandu",
+                                "address": "Baluwatar, Kathmandu",
+                                "phone": "16600102005",
+                                "hotline": True,
+                                "website": "https://www.tponepal.org",
+                                "hours": "Daily 8:00 AM to 6:00 PM",
+                                "lat": 27.72835,
+                                "lng": 85.33037,
+                                "distance_km": 1.2
+                            }
+                        ],
+                        "recommended_resource_ids": ["CR001", "CR002"]
+                    }
+                }
+            }
+        }
+    }
+)
 def submit_epds_screening(
     answers: EPDSAnswerSchema,
     current_user: User = Depends(get_current_user)
@@ -1166,7 +1284,13 @@ def submit_epds_screening(
         # Calculate total score and risk level
         total_score, risk_level = calculate_epds_score(answers)
         
+        # Calculate standardized risk level
+        standardized_risk = epds_to_risk_level(total_score, answers.q10)
+        
         # Store result in database
+        crisis_resources = None
+        recommended_resource_ids = None
+        
         with Session(engine) as session:
             epds_result = EPDSResult(
                 user_id=current_user.id,
@@ -1187,6 +1311,34 @@ def submit_epds_screening(
             session.add(epds_result)
             session.commit()
             session.refresh(epds_result)
+            
+            # Fetch crisis resources if requested and store IDs
+            if answers.include_crisis_resources:
+                try:
+                    crisis_resources = get_recommended_crisis_resources(
+                        session=session,
+                        risk_level=standardized_risk,
+                        city=answers.city or "Kathmandu",
+                        lat=answers.lat,
+                        lng=answers.lng,
+                        limit=answers.limit
+                    )
+                    # Extract IDs and store in database
+                    if crisis_resources:
+                        recommended_resource_ids = [r.id for r in crisis_resources]
+                        epds_result.recommended_resource_ids = recommended_resource_ids
+                        session.add(epds_result)
+                        session.commit()
+                    else:
+                        # Empty list when computed but no results
+                        recommended_resource_ids = []
+                except Exception as e:
+                    logger.error(
+                        f"Error fetching crisis resources for EPDS: {str(e)}",
+                        exc_info=True,
+                    )
+                    crisis_resources = []
+                    recommended_resource_ids = []
             
         # Build symptoms_text for recommendation service (simple summary based on EPDS)
         symptoms_text = f"EPDS total score {total_score}, risk level {risk_level}."
@@ -1211,30 +1363,7 @@ def submit_epds_screening(
 
         # For result page: show at most 2, while dashboard keeps all 5 from storage
         limited_recommended_articles = recommended_articles[:2] if recommended_articles else []
-
-        # Calculate standardized risk level
-        standardized_risk = epds_to_risk_level(total_score, answers.q10)
-
-        # Fetch crisis resources if requested
-        crisis_resources = None
-        if answers.include_crisis_resources:
-            try:
-                with Session(engine) as session:
-                    crisis_resources = get_recommended_crisis_resources(
-                        session=session,
-                        risk_level=standardized_risk,
-                        city=answers.city or "Kathmandu",
-                        lat=answers.lat,
-                        lng=answers.lng,
-                        limit=answers.limit
-                    )
-            except Exception as e:
-                logger.error(
-                    f"Error fetching crisis resources for EPDS: {str(e)}",
-                    exc_info=True,
-                )
-                crisis_resources = []
-
+        
         return {
             "message": "EPDS screening completed successfully",
             "result": {
@@ -1263,7 +1392,8 @@ def submit_epds_screening(
             "recommended_articles": limited_recommended_articles,
             "recommendations_status": recommendations_status,
             "risk_level_standard": standardized_risk,
-            "crisis_resources": crisis_resources,
+            "crisis_resources": [r.model_dump() for r in crisis_resources] if crisis_resources else None,
+            "recommended_resource_ids": recommended_resource_ids,
         }
     except HTTPException:
         raise
@@ -1272,7 +1402,46 @@ def submit_epds_screening(
         raise HTTPException(status_code=503, detail=f"Error processing EPDS screening: {str(e)}")
 
 
-@app.get("/epds-screen/history", response_model=EPDSHistoryResponseSchema)
+@app.get(
+    "/epds-screen/history",
+    response_model=EPDSHistoryResponseSchema,
+    responses={
+        200: {
+            "description": "EPDS screening history with optional crisis resources",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "history": [
+                            {
+                                "id": "123",
+                                "total_score": 15,
+                                "risk_level": "High",
+                                "created_at": "2026-02-07T10:30:00",
+                                "crisis_resources": [
+                                    {
+                                        "id": "CR001",
+                                        "name": "TPO Nepal Helpline",
+                                        "type": "helpline",
+                                        "city": "Kathmandu",
+                                        "address": "Baluwatar, Kathmandu",
+                                        "phone": "16600102005",
+                                        "hotline": True,
+                                        "website": "https://www.tponepal.org",
+                                        "hours": "Daily 8:00 AM to 6:00 PM",
+                                        "lat": 27.72835,
+                                        "lng": 85.33037,
+                                        "distance_km": None
+                                    }
+                                ]
+                            }
+                        ],
+                        "count": 1
+                    }
+                }
+            }
+        }
+    }
+)
 def get_epds_history(current_user: User = Depends(get_current_user)):
     """
     Get the user's EPDS screening history.
@@ -1294,6 +1463,16 @@ def get_epds_history(current_user: User = Depends(get_current_user)):
                 created_at = (
                     result.created_at.isoformat() if result.created_at else ""
                 )
+                
+                # Fetch crisis resources from stored IDs
+                crisis_resources = None
+                if result.recommended_resource_ids:
+                    try:
+                        crisis_resources = get_resources_by_ids(session, result.recommended_resource_ids)
+                        crisis_resources = [res.model_dump() for res in crisis_resources]
+                    except Exception as e:
+                        logger.warning(f"Error fetching crisis resources for EPDS history {result.id}: {str(e)}")
+                        crisis_resources = None
 
                 history_items.append(
                     {
@@ -1301,9 +1480,10 @@ def get_epds_history(current_user: User = Depends(get_current_user)):
                         "total_score": total_score,
                         "risk_level": risk_level,
                         "created_at": created_at,
+                        "crisis_resources": crisis_resources
                     }
                 )
-
+            
             return {
                 "history": history_items,
                 "count": len(history_items),
@@ -1313,7 +1493,63 @@ def get_epds_history(current_user: User = Depends(get_current_user)):
         raise HTTPException(status_code=503, detail=f"Error fetching screening history: {str(e)}")
 
 
-@app.get("/hybrid-screen/history", response_model=HybridScreeningHistoryResponseSchema)
+@app.get(
+    "/hybrid-screen/history",
+    response_model=HybridScreeningHistoryResponseSchema,
+    responses={
+        200: {
+            "description": "Hybrid screening history with optional crisis resources",
+            "content": {
+                "application/json": {
+                    "example": {
+                "history": [
+                    {
+                                "id": "456",
+                                "risk_label": "High",
+                                "final_probability": 0.75,
+                                "is_critical": False,
+                                "clinical_recommendation": "Clinical assessment recommended. Consider referral.",
+                                "epds_total_score": 15,
+                                "epds_risk_level": "High",
+                                "fusion_method": "weighted_average",
+                                "explanation": "Combined EPDS and ML assessment indicates elevated risk.",
+                                "metrics": {
+                                    "epds_risk": "High",
+                                    "ml_probability": 0.72,
+                                    "fusion_score": 0.75
+                                },
+                                "audit": {
+                                    "timestamp": "2026-02-07T10:30:00",
+                                    "decision_path": ["EPDS_HIGH", "ML_HIGH"],
+                                    "is_discordant": False,
+                                    "uncertainty_flag": False
+                                },
+                                "created_at": "2026-02-07T10:30:00",
+                                "crisis_resources": [
+                                    {
+                                        "id": "CR001",
+                                        "name": "TPO Nepal Helpline",
+                                        "type": "helpline",
+                                        "city": "Kathmandu",
+                                        "address": "Baluwatar, Kathmandu",
+                                        "phone": "16600102005",
+                                        "hotline": True,
+                                        "website": "https://www.tponepal.org",
+                                        "hours": "Daily 8:00 AM to 6:00 PM",
+                                        "lat": 27.72835,
+                                        "lng": 85.33037,
+                                        "distance_km": None
+                                    }
+                                ]
+                            }
+                        ],
+                        "count": 1
+                    }
+                }
+            }
+        }
+    }
+)
 def get_hybrid_screening_history(current_user: User = Depends(get_current_user)):
     """
     Get the user's hybrid screening history.
@@ -1394,6 +1630,16 @@ def get_hybrid_screening_history(current_user: User = Depends(get_current_user))
                         else:
                             decision_path = [str(raw_decision_path)]
 
+                        # Fetch crisis resources from stored IDs
+                        crisis_resources = None
+                        if epds.recommended_resource_ids:
+                            try:
+                                crisis_resources = get_resources_by_ids(session, epds.recommended_resource_ids)
+                                crisis_resources = [res.model_dump() for res in crisis_resources]
+                            except Exception as e:
+                                logger.warning(f"Error fetching crisis resources for hybrid history {epds.id}: {str(e)}")
+                                crisis_resources = None
+                        
                         history.append({
                             "id": str(epds.id),
                             "risk_label": result.risk_label.value,
@@ -1411,7 +1657,8 @@ def get_hybrid_screening_history(current_user: User = Depends(get_current_user))
                                 "is_discordant": result.audit_record.is_discordant,
                                 "uncertainty_flag": result.audit_record.uncertainty_flag
                             },
-                            "created_at": created_at
+                            "created_at": created_at,
+                            "crisis_resources": crisis_resources
                         })
                     except (ValueError, KeyError, json.JSONDecodeError) as e:
                         # Skip this entry if we can't process it
@@ -1480,7 +1727,53 @@ def get_screening_counts(current_user: User = Depends(get_current_user)):
         raise HTTPException(status_code=503, detail=f"Error fetching screening counts: {str(e)}")
 
 
-@app.get("/epds-screen/{result_id}", response_model=EPDSResultDetailSchema)
+@app.get(
+    "/epds-screen/{result_id}",
+    response_model=EPDSResultDetailSchema,
+    responses={
+        200: {
+            "description": "EPDS screening result detail with optional crisis resources",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "id": 123,
+                        "total_score": 15,
+                        "risk_level": "High",
+                        "answers": {
+                            "q1": 2,
+                            "q2": 1,
+                            "q3": 3,
+                            "q4": 2,
+                            "q5": 1,
+                            "q6": 2,
+                            "q7": 1,
+                            "q8": 1,
+                            "q9": 1,
+                            "q10": 1
+                        },
+                        "created_at": "2026-02-07T10:30:00",
+                        "crisis_resources": [
+                            {
+                                "id": "CR001",
+                                "name": "TPO Nepal Helpline",
+                                "type": "helpline",
+                                "city": "Kathmandu",
+                                "address": "Baluwatar, Kathmandu",
+                                "phone": "16600102005",
+                                "hotline": True,
+                                "website": "https://www.tponepal.org",
+                                "hours": "Daily 8:00 AM to 6:00 PM",
+                                "lat": 27.72835,
+                                "lng": 85.33037,
+                                "distance_km": None
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    }
+)
 def get_epds_result(result_id: int, current_user: User = Depends(get_current_user)):
     """
     Get a specific EPDS screening result by ID.
@@ -1494,6 +1787,16 @@ def get_epds_result(result_id: int, current_user: User = Depends(get_current_use
             
             if not result:
                 raise HTTPException(status_code=404, detail="EPDS screening result not found")
+            
+            # Fetch crisis resources from stored IDs
+            crisis_resources = None
+            if result.recommended_resource_ids:
+                try:
+                    crisis_resources = get_resources_by_ids(session, result.recommended_resource_ids)
+                    crisis_resources = [res.model_dump() for res in crisis_resources]
+                except Exception as e:
+                    logger.warning(f"Error fetching crisis resources for EPDS detail {result.id}: {str(e)}")
+                    crisis_resources = None
             
             return {
                 "id": result.id,
@@ -1511,7 +1814,8 @@ def get_epds_result(result_id: int, current_user: User = Depends(get_current_use
                     "q9": result.q9,
                     "q10": result.q10,
                 },
-                "created_at": result.created_at.isoformat()
+                "created_at": result.created_at.isoformat(),
+                "crisis_resources": crisis_resources
             }
     except HTTPException:
         raise
@@ -1520,7 +1824,79 @@ def get_epds_result(result_id: int, current_user: User = Depends(get_current_use
         raise HTTPException(status_code=503, detail=f"Error fetching screening result: {str(e)}")
 
 
-@app.get("/screening/hybrid/{result_id}")
+@app.get(
+    "/screening/hybrid/{result_id}",
+    responses={
+        200: {
+            "description": "Hybrid screening result detail with optional crisis resources",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "id": 456,
+                        "risk_label": "High",
+                        "final_probability": 0.75,
+                        "is_critical": False,
+                        "clinical_recommendation": "Clinical assessment recommended. Consider referral.",
+                        "explanation": "Combined EPDS and ML assessment indicates elevated risk.",
+                        "fusion_method": "weighted_average",
+                        "metrics": {
+                            "epds_risk": "High",
+                            "ml_probability": 0.72,
+                            "fusion_score": 0.75
+                        },
+                        "audit": {
+                            "timestamp": "2026-02-07T10:30:00",
+                            "decision_path": ["EPDS_HIGH", "ML_HIGH"],
+                            "is_discordant": False,
+                            "uncertainty_flag": False
+                        },
+                        "epds_data": {
+                            "total_score": 15,
+                            "risk_level": "High",
+                            "answers": {
+                                "q1": 2,
+                                "q2": 1,
+                                "q3": 3,
+                                "q4": 2,
+                                "q5": 1,
+                                "q6": 2,
+                                "q7": 1,
+                                "q8": 1,
+                                "q9": 1,
+                                "q10": 1
+                            }
+                        },
+                        "ppd_data": {
+                            "ml_probability": 0.72,
+                            "ml_response": {
+                                "probability": 0.72,
+                                "risk_level": "High"
+                            }
+                        },
+                        "created_at": "2026-02-07T10:30:00",
+                        "system_disclaimer": "Screening aid only. Consult clinical guidelines.",
+                        "crisis_resources": [
+                            {
+                                "id": "CR001",
+                                "name": "TPO Nepal Helpline",
+                                "type": "helpline",
+                                "city": "Kathmandu",
+                                "address": "Baluwatar, Kathmandu",
+                                "phone": "16600102005",
+                                "hotline": True,
+                                "website": "https://www.tponepal.org",
+                                "hours": "Daily 8:00 AM to 6:00 PM",
+                                "lat": 27.72835,
+                                "lng": 85.33037,
+                                "distance_km": None
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    }
+)
 def get_hybrid_result(result_id: int, current_user: User = Depends(get_current_user)):
     """
     Get a specific hybrid screening result by EPDS result ID.
@@ -1602,6 +1978,16 @@ def get_hybrid_result(result_id: int, current_user: User = Depends(get_current_u
             else:
                 decision_path = [str(raw_decision_path)]
 
+            # Fetch crisis resources from stored IDs
+            crisis_resources = None
+            if epds_result.recommended_resource_ids:
+                try:
+                    crisis_resources = get_resources_by_ids(session, epds_result.recommended_resource_ids)
+                    crisis_resources = [res.model_dump() for res in crisis_resources]
+                except Exception as e:
+                    logger.warning(f"Error fetching crisis resources for hybrid detail {result_id}: {str(e)}")
+                    crisis_resources = None
+            
             return {
                 "id": result_id,
                 "risk_label": result.risk_label.value,
@@ -1638,7 +2024,8 @@ def get_hybrid_result(result_id: int, current_user: User = Depends(get_current_u
                     "ml_response": ml_response
                 },
                 "created_at": epds_result.created_at.isoformat(),
-                "system_disclaimer": "Screening aid only. Consult clinical guidelines."
+                "system_disclaimer": "Screening aid only. Consult clinical guidelines.",
+                "crisis_resources": crisis_resources
             }
     except HTTPException:
         raise
@@ -1658,7 +2045,66 @@ def get_ppd_risk_form():
     return PPD_RISK_FORM_CONFIG
 
 
-@app.post("/symptom/ppd-risk/assess", response_model=PPDRiskAssessmentResponseSchema)
+@app.post(
+    "/symptom/ppd-risk/assess",
+    response_model=PPDRiskAssessmentResponseSchema,
+    responses={
+        200: {
+            "description": "PPD risk assessment result with optional crisis resources",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "id": "ppd_risk_789",
+                        "result": {
+                            "probability": 0.78,
+                            "risk_level": "High"
+                        },
+                        "createdAt": "2026-02-07T10:30:00",
+                        "risk_level_standard": "HIGH",
+                        "recommended_articles": [
+                            {
+                                "article_id": "art_007",
+                                "title": "Understanding Postpartum Depression Symptoms",
+                                "category": "Mental Health",
+                                "risk_level": "high",
+                                "external_url": "https://example.com/article7",
+                                "access_type": "External Link",
+                                "score": 0.93
+                            },
+                            {
+                                "article_id": "art_008",
+                                "title": "Support Resources for New Mothers",
+                                "category": "Community",
+                                "risk_level": "high",
+                                "external_url": "https://example.com/article8",
+                                "access_type": "External Link",
+                                "score": 0.89
+                            }
+                        ],
+                        "recommendations_status": "ok",
+                        "crisis_resources": [
+                            {
+                                "id": "CR001",
+                                "name": "TPO Nepal Helpline",
+                                "type": "helpline",
+                                "city": "Kathmandu",
+                                "address": "Baluwatar, Kathmandu",
+                                "phone": "16600102005",
+                                "hotline": True,
+                                "website": "https://www.tponepal.org",
+                                "hours": "Daily 8:00 AM to 6:00 PM",
+                                "lat": 27.72835,
+                                "lng": 85.33037,
+                                "distance_km": 1.2
+                            }
+                        ],
+                        "recommended_resource_ids": ["CR001", "CR002"]
+                    }
+                }
+            }
+        }
+    }
+)
 def assess_ppd_risk(
     payload: PPDRiskAssessmentRequestSchema,
     current_user: User = Depends(get_current_user),
@@ -1686,7 +2132,17 @@ def assess_ppd_risk(
             logger.error(f"Failed calling ML service at {predict_url}: {str(e)}", exc_info=True)
             raise HTTPException(status_code=503, detail="ML service is unavailable")
 
+        # Extract ML probability and standardize risk level
+        ml_probability = ml_result.get("probability", 0.0) if isinstance(ml_result, dict) else 0.0
+        risk_level_standard = ml_probability_to_risk_level(ml_probability)
+        # If probability >= CRITICAL threshold, upgrade to CRITICAL
+        if ml_probability >= ML_CRITICAL_THRESHOLD:
+            risk_level_standard = "CRITICAL"
+        
         # Store in DB
+        crisis_resources = None
+        recommended_resource_ids = None
+        
         with Session(engine) as session:
             record = PPDRiskAssessment(
                 user_id=current_user.id,
@@ -1697,12 +2153,83 @@ def assess_ppd_risk(
             session.add(record)
             session.commit()
             session.refresh(record)
+            
+            # Fetch crisis resources if requested and store IDs
+            if payload.include_crisis_resources:
+                try:
+                    crisis_resources = get_recommended_crisis_resources(
+                        session=session,
+                        risk_level=risk_level_standard,
+                        city=payload.city or "Kathmandu",
+                        lat=payload.lat,
+                        lng=payload.lng,
+                        limit=payload.limit
+                    )
+                    # Extract IDs and store in database
+                    if crisis_resources:
+                        recommended_resource_ids = [r.id for r in crisis_resources]
+                        record.recommended_resource_ids = recommended_resource_ids
+                        session.add(record)
+                        session.commit()
+                    else:
+                        # Empty list when computed but no results
+                        recommended_resource_ids = []
+                except Exception as e:
+                    logger.error(
+                        f"Error fetching crisis resources for symptom assessment: {str(e)}",
+                        exc_info=True,
+                    )
+                    crisis_resources = []
+                    recommended_resource_ids = []
 
-            return {
-                "id": f"ppd_risk_{record.id}",
-                "result": ml_result,
-                "createdAt": record.created_at.isoformat(),
-            }
+        # Build symptoms_text from symptom questionnaire answers for recommendations
+        symptoms_parts: List[str] = []
+        for k, v in ml_payload.items():
+            if isinstance(v, str):
+                symptoms_parts.append(f"{k}: {v}")
+        symptoms_text = "; ".join(symptoms_parts) or f"PPD risk assessment with probability {ml_probability:.2f}"
+
+        # Map standardized risk level to lowercase format for article recommendation service
+        # (LOW -> low, MEDIUM -> moderate, HIGH -> high, CRITICAL -> critical)
+        risk_level_mapping = {
+            "LOW": "low",
+            "MEDIUM": "moderate",
+            "HIGH": "high",
+            "CRITICAL": "critical"
+        }
+        risk_level_for_reco = risk_level_mapping.get(risk_level_standard, risk_level_standard.lower())
+
+        # Call article recommendation service (non-blocking for main logic)
+        try:
+            recommended_articles, recommendations_status = _fetch_and_store_article_recommendations(
+                user_id=current_user.id,
+                screening_type="ppd",
+                screening_id=record.id,
+                risk_level=risk_level_for_reco,
+                symptoms_text=symptoms_text,
+                top_n=5,
+            )
+        except Exception as e:
+            logger.error(
+                f"Error generating symptom article recommendations: {str(e)}",
+                exc_info=True,
+            )
+            recommended_articles = []
+            recommendations_status = "unavailable"
+
+        # For result page: show at most 2, while dashboard keeps all 5 from storage
+        limited_recommended_articles = recommended_articles[:2] if recommended_articles else []
+
+        return {
+            "id": f"ppd_risk_{record.id}",
+            "result": ml_result,
+            "createdAt": record.created_at.isoformat(),
+            "risk_level_standard": risk_level_standard,
+            "recommended_articles": limited_recommended_articles,
+            "recommendations_status": recommendations_status,
+            "crisis_resources": [r.model_dump() for r in crisis_resources] if crisis_resources else None,
+            "recommended_resource_ids": recommended_resource_ids,
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -1710,7 +2237,44 @@ def assess_ppd_risk(
         raise HTTPException(status_code=503, detail=f"Error assessing PPD risk: {str(e)}")
 
 
-@app.get("/symptom/ppd-risk/history")
+@app.get(
+    "/symptom/ppd-risk/history",
+    responses={
+        200: {
+            "description": "PPD risk assessment history with optional crisis resources",
+            "content": {
+                "application/json": {
+                    "example": [
+                        {
+                            "id": "ppd_risk_789",
+                            "result": {
+                                "probability": 0.78,
+                                "risk_level": "High"
+                            },
+                            "createdAt": "2026-02-07T10:30:00",
+                            "crisis_resources": [
+                                {
+                                    "id": "CR001",
+                                    "name": "TPO Nepal Helpline",
+                                    "type": "helpline",
+                                    "city": "Kathmandu",
+                                    "address": "Baluwatar, Kathmandu",
+                                    "phone": "16600102005",
+                                    "hotline": True,
+                                    "website": "https://www.tponepal.org",
+                                    "hours": "Daily 8:00 AM to 6:00 PM",
+                                    "lat": 27.72835,
+                                    "lng": 85.33037,
+                                    "distance_km": None
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        }
+    }
+)
 def get_ppd_risk_history(
     current_user: User = Depends(get_current_user),
     limit: int = Query(20, ge=1, le=100),
@@ -1728,20 +2292,67 @@ def get_ppd_risk_history(
                 .all()
             )
 
-            return [
-                {
+            results = []
+            for r in rows:
+                # Fetch crisis resources from stored IDs
+                crisis_resources = None
+                if r.recommended_resource_ids:
+                    try:
+                        crisis_resources = get_resources_by_ids(session, r.recommended_resource_ids)
+                        crisis_resources = [res.model_dump() for res in crisis_resources]
+                    except Exception as e:
+                        logger.warning(f"Error fetching crisis resources for PPD history {r.id}: {str(e)}")
+                        crisis_resources = None
+                
+                results.append({
                     "id": f"ppd_risk_{r.id}",
                     "result": json.loads(r.ml_response_json) if r.ml_response_json else {},
                     "createdAt": r.created_at.isoformat(),
-                }
-                for r in rows
-            ]
+                    "crisis_resources": crisis_resources
+                })
+            
+            return results
     except Exception as e:
         logger.error(f"Error fetching PPD risk history: {str(e)}", exc_info=True)
         raise HTTPException(status_code=503, detail=f"Error fetching PPD risk history: {str(e)}")
 
 
-@app.get("/symptom/ppd-risk/{result_id}")
+@app.get(
+    "/symptom/ppd-risk/{result_id}",
+    responses={
+        200: {
+            "description": "PPD risk assessment result detail with optional crisis resources",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "id": "ppd_risk_789",
+                        "result": {
+                            "probability": 0.78,
+                            "risk_level": "High"
+                        },
+                        "createdAt": "2026-02-07T10:30:00",
+                        "crisis_resources": [
+                            {
+                                "id": "CR001",
+                                "name": "TPO Nepal Helpline",
+                                "type": "helpline",
+                                "city": "Kathmandu",
+                                "address": "Baluwatar, Kathmandu",
+                                "phone": "16600102005",
+                                "hotline": True,
+                                "website": "https://www.tponepal.org",
+                                "hours": "Daily 8:00 AM to 6:00 PM",
+                                "lat": 27.72835,
+                                "lng": 85.33037,
+                                "distance_km": None
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    }
+)
 def get_ppd_risk_result(
     result_id: int,
     current_user: User = Depends(get_current_user),
@@ -1759,10 +2370,21 @@ def get_ppd_risk_result(
             if not r:
                 raise HTTPException(status_code=404, detail="PPD risk result not found")
             
+            # Fetch crisis resources from stored IDs
+            crisis_resources = None
+            if r.recommended_resource_ids:
+                try:
+                    crisis_resources = get_resources_by_ids(session, r.recommended_resource_ids)
+                    crisis_resources = [res.model_dump() for res in crisis_resources]
+                except Exception as e:
+                    logger.warning(f"Error fetching crisis resources for PPD result {r.id}: {str(e)}")
+                    crisis_resources = None
+            
             return {
                 "id": f"ppd_risk_{r.id}",
                 "result": json.loads(r.ml_response_json) if r.ml_response_json else {},
                 "createdAt": r.created_at.isoformat(),
+                "crisis_resources": crisis_resources
             }
     except HTTPException:
         raise
@@ -1855,7 +2477,80 @@ def _extract_ml_probability(ml_result: dict) -> float:
     raise ValueError(f"Could not extract probability from ML response. Available keys: {list(ml_result.keys())}")
 
 
-@app.post("/screening/hybrid", response_model=HybridScreeningSubmitResponseSchema)
+@app.post(
+    "/screening/hybrid",
+    response_model=HybridScreeningSubmitResponseSchema,
+    responses={
+        200: {
+            "description": "Hybrid screening result with optional crisis resources",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "id": 456,
+                        "risk_label": "High",
+                        "risk_level_standard": "HIGH",
+                        "final_probability": 0.75,
+                        "is_critical": False,
+                        "clinical_recommendation": "Clinical assessment recommended. Consider referral.",
+                        "explanation": "Combined EPDS and ML assessment indicates elevated risk.",
+                        "fusion_method": "weighted_average",
+                        "metrics": {
+                            "epds_risk": "High",
+                            "ml_probability": 0.72,
+                            "fusion_score": 0.75
+                        },
+                        "epds_data": {
+                            "total_score": 15,
+                            "risk_level": "High"
+                        },
+                        "ppd_data": {
+                            "ml_probability": 0.72
+                        },
+                        "recommended_articles": [
+                            {
+                                "article_id": "art_005",
+                                "title": "Comprehensive Postpartum Care Guide",
+                                "category": "Mental Health",
+                                "risk_level": "high",
+                                "external_url": "https://example.com/article5",
+                                "access_type": "External Link",
+                                "score": 0.90
+                            },
+                            {
+                                "article_id": "art_006",
+                                "title": "Building Support Networks",
+                                "category": "Community",
+                                "risk_level": "high",
+                                "external_url": "https://example.com/article6",
+                                "access_type": "External Link",
+                                "score": 0.87
+                            }
+                        ],
+                        "recommendations_status": "ok",
+                        "crisis_resources": [
+                            {
+                                "id": "CR001",
+                                "name": "TPO Nepal Helpline",
+                                "type": "helpline",
+                                "city": "Kathmandu",
+                                "address": "Baluwatar, Kathmandu",
+                                "phone": "16600102005",
+                                "hotline": True,
+                                "website": "https://www.tponepal.org",
+                                "hours": "Daily 8:00 AM to 6:00 PM",
+                                "lat": 27.72835,
+                                "lng": 85.33037,
+                                "distance_km": 1.2
+                            }
+                        ],
+                        "recommended_resource_ids": ["CR001", "CR002"],
+                        "created_at": "2026-02-07T10:30:00"
+                    }
+                }
+            }
+        }
+    }
+)
 def perform_hybrid_screening(
     request: HybridScreeningRequestSchema,
     current_user: User = Depends(get_current_user)
@@ -1983,9 +2678,11 @@ def perform_hybrid_screening(
             )
             session.add(ppd_record)
             session.commit()
+            session.refresh(epds_result)
             
-            # Fetch crisis resources if requested
+            # Fetch crisis resources if requested and store IDs
             crisis_resources = None
+            recommended_resource_ids = None
             if request.include_crisis_resources:
                 try:
                     crisis_resources = get_recommended_crisis_resources(
@@ -1996,12 +2693,22 @@ def perform_hybrid_screening(
                         lng=request.lng,
                         limit=request.limit
                     )
+                    # Extract IDs and store in database
+                    if crisis_resources:
+                        recommended_resource_ids = [r.id for r in crisis_resources]
+                        epds_result.recommended_resource_ids = recommended_resource_ids
+                        session.add(epds_result)
+                        session.commit()
+                    else:
+                        # Empty list when computed but no results
+                        recommended_resource_ids = []
                 except Exception as e:
                     logger.error(
                         f"Error fetching crisis resources for hybrid: {str(e)}",
                         exc_info=True,
                     )
                     crisis_resources = []
+                    recommended_resource_ids = []
 
         # Build symptoms_text from symptom questionnaire answers for recommendations
         symptoms_parts: List[str] = []
@@ -2063,7 +2770,8 @@ def perform_hybrid_screening(
             "recommended_articles": limited_recommended_articles,
             "recommendations_status": recommendations_status,
             "risk_level_standard": hybrid_risk_standard,
-            "crisis_resources": crisis_resources,
+            "crisis_resources": [r.model_dump() for r in crisis_resources] if crisis_resources else None,
+            "recommended_resource_ids": recommended_resource_ids,
         }
         
     except HTTPException:
@@ -5757,7 +6465,82 @@ def get_partner_linked_mothers(current_user: User = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail=f"Error fetching linked mothers: {str(e)}")
 
 
-@app.get("/screening/{mother_id}/summary", response_model=ScreeningSummarySchema)
+@app.get(
+    "/screening/{mother_id}/summary",
+    response_model=ScreeningSummarySchema,
+    responses={
+        200: {
+            "description": "Screening summary with latest results and article recommendations",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "total_screenings": 5,
+                        "epds_count": 2,
+                        "ppd_count": 2,
+                        "hybrid_count": 1,
+                        "latest_epds": {
+                            "id": "epds_123",
+                            "total_score": 15,
+                            "risk_level": "high",
+                            "created_at": "2026-02-07T10:30:00",
+                            "recommended_articles": [
+                                {
+                                    "article_id": "art_001",
+                                    "title": "Understanding Postpartum Depression",
+                                    "category": "Mental Health",
+                                    "risk_level": "high",
+                                    "external_url": "https://example.com/article1",
+                                    "access_type": "External Link",
+                                    "score": 0.95
+                                },
+                                {
+                                    "article_id": "art_002",
+                                    "title": "Coping Strategies for New Mothers",
+                                    "category": "Wellness",
+                                    "risk_level": "high",
+                                    "external_url": "https://example.com/article2",
+                                    "access_type": "External Link",
+                                    "score": 0.88
+                                }
+                            ],
+                            "recommendations_status": "ok"
+                        },
+                        "latest_ppd": {
+                            "id": "ppd_789",
+                            "result": {
+                                "probability": 0.78,
+                                "risk_level": "High"
+                            },
+                            "created_at": "2026-02-07T10:30:00",
+                            "recommended_articles": [
+                                {
+                                    "article_id": "art_003",
+                                    "title": "Postpartum Mental Health Support",
+                                    "category": "Mental Health",
+                                    "risk_level": "high",
+                                    "external_url": "https://example.com/article3",
+                                    "access_type": "External Link",
+                                    "score": 0.92
+                                },
+                                {
+                                    "article_id": "art_004",
+                                    "title": "Self-Care for New Mothers",
+                                    "category": "Wellness",
+                                    "risk_level": "high",
+                                    "external_url": "https://example.com/article4",
+                                    "access_type": "External Link",
+                                    "score": 0.85
+                                }
+                            ],
+                            "recommendations_status": "ok"
+                        },
+                        "latest_hybrid": None
+                    }
+                }
+            }
+        }
+    }
+)
 def get_screening_summary(
     mother_id: int,
     current_user: User = Depends(get_current_user)
@@ -5857,25 +6640,45 @@ def get_screening_summary(
             }
             
             if latest_epds and ("epds" in allowed_types or not link):
+                # Fetch stored article recommendations for EPDS
+                epds_articles, epds_status = _fetch_stored_article_recommendations(
+                    session=session,
+                    user_id=mother_id_int,
+                    screening_type="epds",
+                    screening_id=latest_epds.id,
+                )
                 summary["latest_epds"] = {
                     "id": f"epds_{latest_epds.id}",
                     "total_score": latest_epds.total_score,
                     "risk_level": latest_epds.risk_level,
-                    "created_at": latest_epds.created_at.isoformat()
+                    "created_at": latest_epds.created_at.isoformat(),
+                    "recommended_articles": epds_articles,
+                    "recommendations_status": epds_status,
                 }
             
             if latest_ppd and ("ppd" in allowed_types or not link):
+                # Fetch stored article recommendations for PPD
+                ppd_articles, ppd_status = _fetch_stored_article_recommendations(
+                    session=session,
+                    user_id=mother_id_int,
+                    screening_type="ppd",
+                    screening_id=latest_ppd.id,
+                )
                 try:
                     ml_response = json.loads(latest_ppd.ml_response_json)
                     summary["latest_ppd"] = {
                         "id": f"ppd_{latest_ppd.id}",
                         "result": ml_response,
-                        "created_at": latest_ppd.created_at.isoformat()
+                        "created_at": latest_ppd.created_at.isoformat(),
+                        "recommended_articles": ppd_articles,
+                        "recommendations_status": ppd_status,
                     }
                 except:
                     summary["latest_ppd"] = {
                         "id": f"ppd_{latest_ppd.id}",
-                        "created_at": latest_ppd.created_at.isoformat()
+                        "created_at": latest_ppd.created_at.isoformat(),
+                        "recommended_articles": ppd_articles,
+                        "recommendations_status": ppd_status,
                     }
             
             return summary
@@ -5886,7 +6689,176 @@ def get_screening_summary(
         raise HTTPException(status_code=500, detail=f"Error fetching screening summary: {str(e)}")
 
 
-@app.get("/screening/{mother_id}/history", response_model=ScreeningHistoryResponseSchema)
+@app.get(
+    "/screening/{mother_id}/history",
+    response_model=ScreeningHistoryResponseSchema,
+    responses={
+        200: {
+            "description": "Screening history with optional crisis resources (accessible by mother or partner)",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "total": 3,
+                        "items": [
+                            {
+                                "id": "epds_123",
+                                "type": "epds",
+                                "result": {
+                                    "total_score": 15,
+                                    "risk_level": "High",
+                                    "q1": 2,
+                                    "q2": 1,
+                                    "q3": 3,
+                                    "q4": 2,
+                                    "q5": 1,
+                                    "q6": 2,
+                                    "q7": 1,
+                                    "q8": 1,
+                                    "q9": 1,
+                                    "q10": 1
+                                },
+                                "created_at": "2026-02-07T10:30:00",
+                                "crisis_resources": [
+                                    {
+                                        "id": "CR001",
+                                        "name": "TPO Nepal Helpline",
+                                        "type": "helpline",
+                                        "city": "Kathmandu",
+                                        "address": "Baluwatar, Kathmandu",
+                                        "phone": "16600102005",
+                                        "hotline": True,
+                                        "website": "https://www.tponepal.org",
+                                        "hours": "Daily 8:00 AM to 6:00 PM",
+                                        "lat": 27.72835,
+                                        "lng": 85.33037,
+                                        "distance_km": None
+                                    }
+                                ],
+                                "recommended_articles": [
+                                    {
+                                        "article_id": "art_001",
+                                        "title": "Understanding Postpartum Depression",
+                                        "category": "Mental Health",
+                                        "risk_level": "high",
+                                        "external_url": "https://example.com/article1",
+                                        "access_type": "External Link",
+                                        "score": 0.95
+                                    },
+                                    {
+                                        "article_id": "art_002",
+                                        "title": "Coping Strategies for New Mothers",
+                                        "category": "Wellness",
+                                        "risk_level": "high",
+                                        "external_url": "https://example.com/article2",
+                                        "access_type": "External Link",
+                                        "score": 0.88
+                                    }
+                                ],
+                                "recommendations_status": "ok"
+                            },
+                            {
+                                "id": "ppd_789",
+                                "type": "ppd",
+                                "result": {
+                                    "probability": 0.78,
+                                    "risk_level": "High"
+                                },
+                                "created_at": "2026-02-07T10:30:00",
+                                "crisis_resources": [
+                                    {
+                                        "id": "CR001",
+                                        "name": "TPO Nepal Helpline",
+                                        "type": "helpline",
+                                        "city": "Kathmandu",
+                                        "address": "Baluwatar, Kathmandu",
+                                        "phone": "16600102005",
+                                        "hotline": True,
+                                        "website": "https://www.tponepal.org",
+                                        "hours": "Daily 8:00 AM to 6:00 PM",
+                                        "lat": 27.72835,
+                                        "lng": 85.33037,
+                                        "distance_km": None
+                                    }
+                                ],
+                                "recommended_articles": [
+                                    {
+                                        "article_id": "art_003",
+                                        "title": "Postpartum Mental Health Support",
+                                        "category": "Mental Health",
+                                        "risk_level": "high",
+                                        "external_url": "https://example.com/article3",
+                                        "access_type": "External Link",
+                                        "score": 0.92
+                                    },
+                                    {
+                                        "article_id": "art_004",
+                                        "title": "Self-Care for New Mothers",
+                                        "category": "Wellness",
+                                        "risk_level": "high",
+                                        "external_url": "https://example.com/article4",
+                                        "access_type": "External Link",
+                                        "score": 0.85
+                                    }
+                                ],
+                                "recommendations_status": "ok"
+                            },
+                            {
+                                "id": "hybrid_456",
+                                "type": "hybrid",
+                                "result": {
+                                    "risk_label": "High",
+                                    "final_probability": 0.75,
+                                    "is_critical": False,
+                                    "explanation": "Combined EPDS and ML assessment indicates elevated risk.",
+                                    "epds_total": 15,
+                                    "ml_probability": 0.72
+                                },
+                                "created_at": "2026-02-07T10:30:00",
+                                "crisis_resources": [
+                                    {
+                                        "id": "CR001",
+                                        "name": "TPO Nepal Helpline",
+                                        "type": "helpline",
+                                        "city": "Kathmandu",
+                                        "address": "Baluwatar, Kathmandu",
+                                        "phone": "16600102005",
+                                        "hotline": True,
+                                        "website": "https://www.tponepal.org",
+                                        "hours": "Daily 8:00 AM to 6:00 PM",
+                                        "lat": 27.72835,
+                                        "lng": 85.33037,
+                                        "distance_km": None
+                                    }
+                                ],
+                                "recommended_articles": [
+                                    {
+                                        "article_id": "art_005",
+                                        "title": "Comprehensive Postpartum Care Guide",
+                                        "category": "Mental Health",
+                                        "risk_level": "high",
+                                        "external_url": "https://example.com/article5",
+                                        "access_type": "External Link",
+                                        "score": 0.90
+                                    },
+                                    {
+                                        "article_id": "art_006",
+                                        "title": "Building Support Networks",
+                                        "category": "Community",
+                                        "risk_level": "high",
+                                        "external_url": "https://example.com/article6",
+                                        "access_type": "External Link",
+                                        "score": 0.87
+                                    }
+                                ],
+                                "recommendations_status": "ok"
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    }
+)
 def get_screening_history(
     mother_id: int,
     screening_type: Optional[str] = Query(None, description="Filter by type: epds, ppd, hybrid"),
@@ -5950,6 +6922,24 @@ def get_screening_history(
                 ).order_by(EPDSResult.created_at.desc()).all()
                 
                 for result in epds_results:
+                    # Fetch crisis resources from stored IDs
+                    crisis_resources = None
+                    if result.recommended_resource_ids:
+                        try:
+                            crisis_resources = get_resources_by_ids(session, result.recommended_resource_ids)
+                            crisis_resources = [r.model_dump() for r in crisis_resources]
+                        except Exception as e:
+                            logger.warning(f"Error fetching crisis resources for EPDS {result.id}: {str(e)}")
+                            crisis_resources = None
+                    
+                    # Fetch stored article recommendations for EPDS
+                    epds_articles, epds_status = _fetch_stored_article_recommendations(
+                        session=session,
+                        user_id=mother_id_int,
+                        screening_type="epds",
+                        screening_id=result.id,
+                    )
+                    
                     history_items.append({
                         "id": f"epds_{result.id}",
                         "type": "epds",
@@ -5967,7 +6957,10 @@ def get_screening_history(
                             "q9": result.q9,
                             "q10": result.q10
                         },
-                        "created_at": result.created_at.isoformat()
+                        "created_at": result.created_at.isoformat(),
+                        "crisis_resources": crisis_resources,
+                        "recommended_articles": epds_articles,
+                        "recommendations_status": epds_status,
                     })
             
             # Get PPD results
@@ -5982,11 +6975,32 @@ def get_screening_history(
                     except:
                         ml_response = {}
                     
+                    # Fetch crisis resources from stored IDs
+                    crisis_resources = None
+                    if result.recommended_resource_ids:
+                        try:
+                            crisis_resources = get_resources_by_ids(session, result.recommended_resource_ids)
+                            crisis_resources = [r.model_dump() for r in crisis_resources]
+                        except Exception as e:
+                            logger.warning(f"Error fetching crisis resources for PPD {result.id}: {str(e)}")
+                            crisis_resources = None
+                    
+                    # Fetch stored article recommendations for PPD
+                    ppd_articles, ppd_status = _fetch_stored_article_recommendations(
+                        session=session,
+                        user_id=mother_id_int,
+                        screening_type="ppd",
+                        screening_id=result.id,
+                    )
+                    
                     history_items.append({
                         "id": f"ppd_{result.id}",
                         "type": "ppd",
                         "result": ml_response,
-                        "created_at": result.created_at.isoformat()
+                        "created_at": result.created_at.isoformat(),
+                        "crisis_resources": crisis_resources,
+                        "recommended_articles": ppd_articles,
+                        "recommendations_status": ppd_status,
                     })
             
             # Get hybrid screening results
@@ -6022,6 +7036,24 @@ def get_screening_history(
                                 ml_raw_probability=ml_prob
                             )
                             
+                            # Fetch crisis resources from stored IDs
+                            crisis_resources = None
+                            if epds.recommended_resource_ids:
+                                try:
+                                    crisis_resources = get_resources_by_ids(session, epds.recommended_resource_ids)
+                                    crisis_resources = [r.model_dump() for r in crisis_resources]
+                                except Exception as e:
+                                    logger.warning(f"Error fetching crisis resources for hybrid {epds.id}: {str(e)}")
+                                    crisis_resources = None
+                            
+                            # Fetch stored article recommendations for Hybrid
+                            hybrid_articles, hybrid_status = _fetch_stored_article_recommendations(
+                                session=session,
+                                user_id=mother_id_int,
+                                screening_type="hybrid",
+                                screening_id=epds.id,
+                            )
+                            
                             history_items.append({
                                 "id": f"hybrid_{epds.id}",
                                 "type": "hybrid",
@@ -6033,7 +7065,10 @@ def get_screening_history(
                                     "epds_total": epds.total_score,
                                     "ml_probability": ml_prob
                                 },
-                                "created_at": epds.created_at.isoformat()
+                                "created_at": epds.created_at.isoformat(),
+                                "crisis_resources": crisis_resources,
+                                "recommended_articles": hybrid_articles,
+                                "recommendations_status": hybrid_status,
                             })
                         except Exception as e:
                             logger.warning(f"Could not process hybrid screening {epds.id}: {str(e)}")
@@ -6059,13 +7094,85 @@ def get_screening_history(
 
 # ==================== CRISIS RESOURCES API ENDPOINTS ====================
 
-@app.post("/crisis-resources/recommend", response_model=List[CrisisResourceOut])
+@app.post(
+    "/crisis-resources/recommend",
+    response_model=List[CrisisResourceOut],
+    responses={
+        200: {
+            "description": "List of recommended crisis resources",
+            "content": {
+                "application/json": {
+                    "example": [
+                        {
+                            "id": "CR001",
+                            "name": "TPO Nepal (Transcultural Psychosocial Organization Nepal) Helpline",
+                            "type": "helpline",
+                            "province": "Bagmati",
+                            "city": "Kathmandu",
+                            "address": "Baluwatar, Kathmandu",
+                            "phone": "16600102005",
+                            "hotline": True,
+                            "website": "https://www.tponepal.org",
+                            "hours": "Daily 8:00 AM to 6:00 PM",
+                            "description": "Psychosocial counseling and support helpline (TPO Nepal).",
+                            "lat": 27.72835,
+                            "lng": 85.33037,
+                            "risk_supported": ["HIGH", "CRITICAL"],
+                            "is_active": True,
+                            "distance_km": 1.2
+                        },
+                        {
+                            "id": "CR002",
+                            "name": "Tribhuvan University Teaching Hospital (TUTH) Psychiatry & Mental Health",
+                            "type": "hospital",
+                            "province": "Bagmati",
+                            "city": "Kathmandu",
+                            "address": "Maharajgunj, Kathmandu",
+                            "phone": "+977-1-4512505",
+                            "hotline": False,
+                            "website": "https://tuth.org.np",
+                            "hours": "Hospital service hours vary (contact hospital)",
+                            "description": "Hospital psychiatry and mental health services (TUTH).",
+                            "lat": 27.736111,
+                            "lng": 85.330278,
+                            "risk_supported": ["HIGH", "CRITICAL"],
+                            "is_active": True,
+                            "distance_km": 2.1
+                        }
+                    ]
+                }
+            }
+        },
+        500: {
+            "description": "Internal server error",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": "Error recommending crisis resources: [error message]"
+                    }
+                }
+            }
+        }
+    }
+)
 def recommend_crisis_resources(
     request: CrisisResourceRecommendRequest
 ):
     """
     Get recommended crisis resources based on risk level, location, and city.
     Returns resources sorted by distance (if coordinates provided) or by priority.
+    
+    **Features:**
+    - Automatically filters resource types based on risk level
+    - Calculates distance if lat/lng provided
+    - Falls back to Kathmandu if no results found for specified city
+    - Returns maximum 5-10 results (configurable via limit parameter)
+    
+    **Risk Level Mapping:**
+    - LOW → wellness resources
+    - MEDIUM → counseling, wellness resources
+    - HIGH → hospital, counseling, helpline, emergency resources
+    - CRITICAL → hospital, counseling, helpline, emergency resources
     """
     try:
         # Apply fallbacks
@@ -6093,9 +7200,10 @@ def recommend_crisis_resources(
             query = query.filter(city_filter)
             
             # Filter by risk_supported array containing the risk level
-            # PostgreSQL array containment: use contains method
+            # PostgreSQL: check if value exists in array using ANY operator
+            from sqlalchemy import text
             query = query.filter(
-                CrisisResource.risk_supported.contains([risk_level_upper])
+                text(f"'{risk_level_upper}' = ANY(crisisresource.risk_supported)")
             )
             
             # Execute query
@@ -6108,8 +7216,9 @@ def recommend_crisis_resources(
                     CrisisResource.type.in_(allowed_types),
                     CrisisResource.city.ilike("%Kathmandu%")
                 )
+                from sqlalchemy import text
                 query = query.filter(
-                    CrisisResource.risk_supported.contains([risk_level_upper])
+                    text(f"'{risk_level_upper}' = ANY(crisisresource.risk_supported)")
                 )
                 resources = query.all()
             
@@ -6162,16 +7271,90 @@ def recommend_crisis_resources(
         raise HTTPException(status_code=500, detail=f"Error recommending crisis resources: {str(e)}")
 
 
-@app.get("/crisis-resources", response_model=List[CrisisResourceOut])
+@app.get(
+    "/crisis-resources",
+    response_model=List[CrisisResourceOut],
+    responses={
+        200: {
+            "description": "List of crisis resources matching the filters",
+            "content": {
+                "application/json": {
+                    "example": [
+                        {
+                            "id": "CR001",
+                            "name": "TPO Nepal (Transcultural Psychosocial Organization Nepal) Helpline",
+                            "type": "helpline",
+                            "province": "Bagmati",
+                            "city": "Kathmandu",
+                            "address": "Baluwatar, Kathmandu",
+                            "phone": "16600102005",
+                            "hotline": True,
+                            "website": "https://www.tponepal.org",
+                            "hours": "Daily 8:00 AM to 6:00 PM",
+                            "description": "Psychosocial counseling and support helpline (TPO Nepal).",
+                            "lat": 27.72835,
+                            "lng": 85.33037,
+                            "risk_supported": ["HIGH", "CRITICAL"],
+                            "is_active": True,
+                            "distance_km": None
+                        },
+                        {
+                            "id": "CR002",
+                            "name": "Tribhuvan University Teaching Hospital (TUTH) Psychiatry & Mental Health",
+                            "type": "hospital",
+                            "province": "Bagmati",
+                            "city": "Kathmandu",
+                            "address": "Maharajgunj, Kathmandu",
+                            "phone": "+977-1-4512505",
+                            "hotline": False,
+                            "website": "https://tuth.org.np",
+                            "hours": "Hospital service hours vary (contact hospital)",
+                            "description": "Hospital psychiatry and mental health services (TUTH).",
+                            "lat": 27.736111,
+                            "lng": 85.330278,
+                            "risk_supported": ["HIGH", "CRITICAL"],
+                            "is_active": True,
+                            "distance_km": None
+                        }
+                    ]
+                }
+            }
+        },
+        500: {
+            "description": "Internal server error",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": "Error fetching crisis resources: [error message]"
+                    }
+                }
+            }
+        }
+    }
+)
 def get_crisis_resources(
-    city: Optional[str] = Query(None, description="Filter by city (default: Kathmandu)"),
-    type: Optional[str] = Query(None, description="Filter by resource type"),
-    risk_level: Optional[str] = Query(None, description="Filter by risk level (LOW, MEDIUM, HIGH, CRITICAL)"),
-    hotline: Optional[bool] = Query(None, description="Filter by hotline status")
+    city: Optional[str] = Query(None, description="Filter by city (default: Kathmandu). Case-insensitive partial match."),
+    type: Optional[str] = Query(None, description="Filter by resource type. Valid types: hospital, helpline, counseling, emergency, wellness, community_support. Case-insensitive partial match."),
+    risk_level: Optional[str] = Query(None, description="Filter by risk level. Must be one of: LOW, MEDIUM, HIGH, CRITICAL"),
+    hotline: Optional[bool] = Query(None, description="Filter by hotline status. true = only hotlines, false = only non-hotlines")
 ):
     """
     Get all crisis resources with optional filters.
     No distance calculation - simple filtering only.
+    
+    **Filtering:**
+    - All filters are optional and can be combined
+    - City filter is case-insensitive and supports partial matching
+    - Type filter is case-insensitive and supports partial matching
+    - Risk level must match exactly (LOW, MEDIUM, HIGH, CRITICAL)
+    - Results are sorted by hotline status (hotlines first), then by name
+    
+    **Example Queries:**
+    - Get all resources in Kathmandu: `?city=Kathmandu`
+    - Get all hospitals: `?type=hospital`
+    - Get CRITICAL risk resources: `?risk_level=CRITICAL`
+    - Get only hotlines: `?hotline=true`
+    - Combined: `?city=Kathmandu&type=hospital&risk_level=CRITICAL`
     """
     try:
         # Apply defaults
@@ -6193,8 +7376,9 @@ def get_crisis_resources(
             # Filter by risk_level if provided
             if risk_level:
                 risk_level_upper = risk_level.upper().strip()
+                from sqlalchemy import func, text
                 query = query.filter(
-                    CrisisResource.risk_supported.contains([risk_level_upper])
+                    text(f"'{risk_level_upper}' = ANY(crisisresource.risk_supported)")
                 )
             
             # Filter by hotline if provided

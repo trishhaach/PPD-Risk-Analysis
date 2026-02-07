@@ -80,6 +80,13 @@ class PPDRiskAssessmentRequestSchema(BaseModel):
     so the frontend can send exactly the same keys the ML service expects.
     """
     model_config = ConfigDict(populate_by_name=True)
+    
+    # Optional crisis resources fields
+    include_crisis_resources: bool = Field(default=False, description="Whether to include crisis resource recommendations")
+    city: Optional[str] = Field(default="Kathmandu", description="City for crisis resource recommendations")
+    lat: Optional[float] = Field(default=None, description="Latitude for distance calculation")
+    lng: Optional[float] = Field(default=None, description="Longitude for distance calculation")
+    limit: int = Field(default=5, ge=1, le=10, description="Maximum number of crisis resources to return")
 
     need_for_support: str = Field(alias="Need for Support")
     recieved_support: str = Field(alias="Recieved Support")
@@ -133,6 +140,25 @@ class PPDRiskAssessmentResponseSchema(BaseModel):
     id: str
     result: dict
     createdAt: str
+    risk_level_standard: Optional[str] = Field(
+        default=None,
+        description="Standardized risk level: LOW, MEDIUM, HIGH, or CRITICAL"
+    )
+    recommended_articles: List["RecommendedArticleSchema"] = Field(
+        default_factory=list,
+        description="List of recommended articles based on this screening (max 2 for result page)"
+    )
+    recommendations_status: str = Field(
+        description="Status of recommendation generation: 'ok' or 'unavailable'"
+    )
+    crisis_resources: Optional[List["CrisisResourceMiniOut"]] = Field(
+        default=None,
+        description="Recommended crisis resources (only included if include_crisis_resources=true in request)"
+    )
+    recommended_resource_ids: Optional[List[str]] = Field(
+        default=None,
+        description="IDs of recommended crisis resources stored in the database"
+    )
 
 
 class HybridScreeningRequestSchema(BaseModel):
@@ -657,6 +683,14 @@ class ScreeningHistoryItemSchema(BaseModel):
     type: str  # "epds", "ppd", "hybrid"
     result: dict
     created_at: str
+    recommended_articles: Optional[List["RecommendedArticleSchema"]] = Field(
+        default=None,
+        description="List of recommended articles (max 2 for result page)"
+    )
+    recommendations_status: Optional[str] = Field(
+        default=None,
+        description="Status of recommendation generation: 'ok' or 'unavailable'"
+    )
 
 
 class ScreeningHistoryResponseSchema(BaseModel):
@@ -760,6 +794,10 @@ class HybridScreeningSubmitResponseSchema(BaseModel):
     crisis_resources: Optional[List["CrisisResourceMiniOut"]] = Field(
         default=None,
         description="Recommended crisis resources (only included if include_crisis_resources=true in request)"
+    )
+    recommended_resource_ids: Optional[List[str]] = Field(
+        default=None,
+        description="IDs of recommended crisis resources stored in the database"
     )
 
 
@@ -1156,6 +1194,10 @@ class EPDSSubmitResponseSchema(BaseModel):
     crisis_resources: Optional[List["CrisisResourceMiniOut"]] = Field(
         default=None,
         description="Recommended crisis resources (only included if include_crisis_resources=true in request)"
+    )
+    recommended_resource_ids: Optional[List[str]] = Field(
+        default=None,
+        description="IDs of recommended crisis resources stored in the database"
     )
 
 

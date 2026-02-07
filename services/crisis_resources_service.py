@@ -64,8 +64,9 @@ def get_recommended_crisis_resources(
     query = query.filter(city_filter)
     
     # Filter by risk_supported array containing the risk level
+    from sqlalchemy import text
     query = query.filter(
-        CrisisResource.risk_supported.contains([risk_level_upper])
+        text(f"'{risk_level_upper}' = ANY(crisisresource.risk_supported)")
     )
     
     # Execute query
@@ -78,8 +79,9 @@ def get_recommended_crisis_resources(
             CrisisResource.type.in_(allowed_types),
             CrisisResource.city.ilike("%Kathmandu%")
         )
+        from sqlalchemy import text
         query = query.filter(
-            CrisisResource.risk_supported.contains([risk_level_upper])
+            text(f"'{risk_level_upper}' = ANY(crisisresource.risk_supported)")
         )
         resources = query.all()
     
@@ -120,4 +122,53 @@ def get_recommended_crisis_resources(
     
     # Return top limit
     return results[:limit]
+
+
+def get_resources_by_ids(
+    session: Session,
+    ids: List[str]
+) -> List[CrisisResourceMiniOut]:
+    """
+    Get crisis resources by their IDs.
+    Simple query - no filtering, no risk logic, no distance calculation.
+    Used for partner views to fetch resources from stored IDs.
+    
+    Args:
+        session: SQLModel database session
+        ids: List of resource IDs to fetch
+    
+    Returns:
+        List of CrisisResourceMiniOut objects (empty list if no IDs provided or not found)
+    """
+    if not ids:
+        return []
+    
+    # Query resources by IDs
+    resources = session.query(CrisisResource).filter(
+        CrisisResource.id.in_(ids),
+        CrisisResource.is_active == True
+    ).all()
+    
+    # Convert to CrisisResourceMiniOut
+    results = []
+    for resource in resources:
+        results.append(CrisisResourceMiniOut(
+            id=resource.id,
+            name=resource.name,
+            type=resource.type,
+            city=resource.city,
+            address=resource.address,
+            phone=resource.phone,
+            hotline=resource.hotline,
+            website=resource.website,
+            hours=resource.hours,
+            lat=resource.lat,
+            lng=resource.lng,
+            distance_km=None  # No distance calculation for partner views
+        ))
+    
+    # Sort by hotline (desc) then name (asc)
+    results.sort(key=lambda x: (-x.hotline, x.name))
+    
+    return results
 
