@@ -57,6 +57,13 @@ class EPDSAnswerSchema(BaseModel):
     q9: int  # I have been so unhappy that I have been crying
     q10: int  # The thought of harming myself has occurred to me
     
+    # Optional crisis resources context
+    include_crisis_resources: bool = False
+    city: Optional[str] = "Kathmandu"
+    lat: Optional[float] = None
+    lng: Optional[float] = None
+    limit: int = Field(default=5, ge=1, le=10)
+    
     @field_validator('q1', 'q2', 'q3', 'q4', 'q5', 'q6', 'q7', 'q8', 'q9', 'q10')
     def validate_answer(cls, v):
         if v not in [0, 1, 2, 3]:
@@ -156,6 +163,13 @@ class HybridScreeningRequestSchema(BaseModel):
     age: float = Field(alias="Age", ge=18.0, le=45.0)
     addiction: str = Field(alias="Addiction")
     husbands_education_level: str = Field(alias="Husband's education level")
+    
+    # Optional crisis resources context
+    include_crisis_resources: bool = False
+    city: Optional[str] = "Kathmandu"
+    lat: Optional[float] = None
+    lng: Optional[float] = None
+    limit: int = Field(default=5, ge=1, le=10)
     
     model_config = ConfigDict(populate_by_name=True)
     
@@ -739,6 +753,14 @@ class HybridScreeningSubmitResponseSchema(BaseModel):
     recommendations_status: str = Field(
         description="Status of recommendation generation: 'ok' or 'unavailable'",
     )
+    risk_level_standard: Optional[str] = Field(
+        default=None,
+        description="Standardized hybrid risk level: LOW, MEDIUM, HIGH, or CRITICAL"
+    )
+    crisis_resources: Optional[List["CrisisResourceMiniOut"]] = Field(
+        default=None,
+        description="Recommended crisis resources (only included if include_crisis_resources=true in request)"
+    )
 
 
 class CreatePostResponseSchema(BaseModel):
@@ -1127,6 +1149,14 @@ class EPDSSubmitResponseSchema(BaseModel):
     recommendations_status: str = Field(
         description="Status of recommendation generation: 'ok' or 'unavailable'"
     )
+    risk_level_standard: Optional[str] = Field(
+        default=None,
+        description="Standardized risk level: LOW, MEDIUM, HIGH, or CRITICAL"
+    )
+    crisis_resources: Optional[List["CrisisResourceMiniOut"]] = Field(
+        default=None,
+        description="Recommended crisis resources (only included if include_crisis_resources=true in request)"
+    )
 
 
 class RecommendedArticleSchema(BaseModel):
@@ -1144,4 +1174,60 @@ class RecommendedArticlesDashboardResponseSchema(BaseModel):
     source_screening_type: Optional[str] = None
     generated_at: Optional[str] = None
     status: Optional[str] = None
+
+
+# ==================== Crisis Resources Schemas ====================
+
+class CrisisContextSchema(BaseModel):
+    """Reusable schema for crisis resource context in screening requests"""
+    include_crisis_resources: bool = False
+    city: Optional[str] = "Kathmandu"
+    lat: Optional[float] = None
+    lng: Optional[float] = None
+    limit: int = Field(default=5, ge=1, le=10)
+
+
+class CrisisResourceMiniOut(BaseModel):
+    """Minimal output schema for crisis resource (embedded in screening responses)"""
+    id: str
+    name: str
+    type: str
+    city: Optional[str] = None
+    address: Optional[str] = None
+    phone: Optional[str] = None
+    hotline: Optional[bool] = None
+    website: Optional[str] = None
+    hours: Optional[str] = None
+    lat: Optional[float] = None
+    lng: Optional[float] = None
+    distance_km: Optional[float] = None
+
+
+class CrisisResourceOut(BaseModel):
+    """Output schema for crisis resource"""
+    id: str
+    name: str
+    type: str
+    province: Optional[str] = None
+    city: str
+    address: Optional[str] = None
+    phone: Optional[str] = None
+    hotline: bool
+    website: Optional[str] = None
+    hours: Optional[str] = None
+    description: Optional[str] = None
+    lat: Optional[float] = None
+    lng: Optional[float] = None
+    risk_supported: List[str]
+    is_active: bool
+    distance_km: Optional[float] = None
+
+
+class CrisisResourceRecommendRequest(BaseModel):
+    """Request schema for crisis resource recommendation"""
+    risk_level: str  # LOW, MEDIUM, HIGH, CRITICAL
+    lat: Optional[float] = None
+    lng: Optional[float] = None
+    city: Optional[str] = None
+    limit: Optional[int] = None
 

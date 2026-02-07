@@ -1,5 +1,5 @@
 from sqlmodel import SQLModel, Field
-from sqlalchemy import Column, String, Integer, DateTime, Text, Boolean, ARRAY, JSON
+from sqlalchemy import Column, String, Integer, DateTime, Text, Boolean, ARRAY, JSON, Float
 from typing import Optional, List
 from datetime import datetime
 import uuid
@@ -329,4 +329,26 @@ class PartnerAccessAudit(SQLModel, table=True):
     mother_id: int = Field(foreign_key="user.id", nullable=False)
     access_type: str = Field(sa_column=Column(String(50), nullable=False))  # "summary", "history", "epds", "ppd", "hybrid"
     resource_id: Optional[int] = Field(default=None, sa_column=Column(Integer, nullable=True))  # Specific result ID if applicable
+    created_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))
+
+
+# ==================== Crisis Resources Models ====================
+
+class CrisisResource(SQLModel, table=True):
+    """Model to store crisis resources (hospitals, counseling, helplines, etc.)"""
+    id: str = Field(sa_column=Column(String(50), primary_key=True, nullable=False))
+    name: str = Field(sa_column=Column(String(200), nullable=False))
+    type: str = Field(sa_column=Column(String(50), nullable=False))  # hospital, counseling, wellness, community_support, helpline, emergency
+    province: Optional[str] = Field(default=None, sa_column=Column(String(100), nullable=True))
+    city: str = Field(sa_column=Column(String(100), nullable=False))
+    address: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    phone: Optional[str] = Field(default=None, sa_column=Column(String(50), nullable=True))
+    hotline: bool = Field(default=False, sa_column=Column(Boolean, nullable=False))
+    website: Optional[str] = Field(default=None, sa_column=Column(String(500), nullable=True))
+    hours: Optional[str] = Field(default=None, sa_column=Column(String(200), nullable=True))
+    description: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    lat: Optional[float] = Field(default=None, sa_column=Column(Float, nullable=True))
+    lng: Optional[float] = Field(default=None, sa_column=Column(Float, nullable=True))
+    risk_supported: List[str] = Field(default_factory=list, sa_column=Column(ARRAY(String), nullable=False))  # LOW, MEDIUM, HIGH, CRITICAL
+    is_active: bool = Field(default=True, sa_column=Column(Boolean, nullable=False))
     created_at: datetime = Field(default_factory=datetime.utcnow, sa_column=Column(DateTime, nullable=False))

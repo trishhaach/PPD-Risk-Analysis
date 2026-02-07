@@ -40,6 +40,9 @@ from sqlmodel import Session
 
 from database import init_db, engine
 from hybrid import HybridScreener
+from crisis_resources import risk_to_allowed_types, haversine_distance
+from utils.risk_mapping import epds_to_risk_level, hybrid_to_risk_level
+from services.crisis_resources_service import get_recommended_crisis_resources
 from models import (
     User,
     EPDSResult,
@@ -67,6 +70,7 @@ from models import (
     PartnerInvite,
     MotherPartnerLink,
     PartnerAccessAudit,
+    CrisisResource,
 )
 from schemas import (
     SignupSchema,
@@ -153,6 +157,8 @@ from schemas import (
     HybridScreeningSubmitResponseSchema,
     RecommendedArticleSchema,
     RecommendedArticlesDashboardResponseSchema,
+    CrisisResourceOut,
+    CrisisResourceRecommendRequest,
 )
 
 # Logging is already set up above (before Supabase import)
@@ -1181,7 +1187,7 @@ def submit_epds_screening(
             session.add(epds_result)
             session.commit()
             session.refresh(epds_result)
-
+            
         # Build symptoms_text for recommendation service (simple summary based on EPDS)
         symptoms_text = f"EPDS total score {total_score}, risk level {risk_level}."
 
@@ -1205,6 +1211,29 @@ def submit_epds_screening(
 
         # For result page: show at most 2, while dashboard keeps all 5 from storage
         limited_recommended_articles = recommended_articles[:2] if recommended_articles else []
+
+        # Calculate standardized risk level
+        standardized_risk = epds_to_risk_level(total_score, answers.q10)
+
+        # Fetch crisis resources if requested
+        crisis_resources = None
+        if answers.include_crisis_resources:
+            try:
+                with Session(engine) as session:
+                    crisis_resources = get_recommended_crisis_resources(
+                        session=session,
+                        risk_level=standardized_risk,
+                        city=answers.city or "Kathmandu",
+                        lat=answers.lat,
+                        lng=answers.lng,
+                        limit=answers.limit
+                    )
+            except Exception as e:
+                logger.error(
+                    f"Error fetching crisis resources for EPDS: {str(e)}",
+                    exc_info=True,
+                )
+                crisis_resources = []
 
         return {
             "message": "EPDS screening completed successfully",
@@ -1233,6 +1262,8 @@ def submit_epds_screening(
             }[risk_level],
             "recommended_articles": limited_recommended_articles,
             "recommendations_status": recommendations_status,
+            "risk_level_standard": standardized_risk,
+            "crisis_resources": crisis_resources,
         }
     except HTTPException:
         raise
@@ -1913,12 +1944,17 @@ def perform_hybrid_screening(
         with Session(engine) as session:
             # Calculate EPDS-specific risk level for storage
             epds_total = sum(request.epds_responses)
+            q10_score = request.epds_responses[9]
             if epds_total < 10:
                 epds_risk_level = "low"
             elif epds_total < 13:
                 epds_risk_level = "moderate"
             else:
                 epds_risk_level = "high"
+            
+            # Calculate standardized risk levels
+            epds_risk_standard = epds_to_risk_level(epds_total, q10_score)
+            hybrid_risk_standard = hybrid_to_risk_level(epds_risk_standard, ml_raw_probability, q10_score)
             
             # Store EPDS result
             epds_result = EPDSResult(
@@ -1947,6 +1983,25 @@ def perform_hybrid_screening(
             )
             session.add(ppd_record)
             session.commit()
+            
+            # Fetch crisis resources if requested
+            crisis_resources = None
+            if request.include_crisis_resources:
+                try:
+                    crisis_resources = get_recommended_crisis_resources(
+                        session=session,
+                        risk_level=hybrid_risk_standard,
+                        city=request.city or "Kathmandu",
+                        lat=request.lat,
+                        lng=request.lng,
+                        limit=request.limit
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Error fetching crisis resources for hybrid: {str(e)}",
+                        exc_info=True,
+                    )
+                    crisis_resources = []
 
         # Build symptoms_text from symptom questionnaire answers for recommendations
         symptoms_parts: List[str] = []
@@ -1970,7 +2025,7 @@ def perform_hybrid_screening(
                 f"Error generating hybrid article recommendations: {str(e)}",
                 exc_info=True,
             )
-            recommended_articles = [],
+            recommended_articles = []
             recommendations_status = "unavailable"
 
         # For result page: show at most 2, while dashboard keeps all 5 from storage
@@ -2007,6 +2062,8 @@ def perform_hybrid_screening(
             "system_disclaimer": "Screening aid only. Consult clinical guidelines.",
             "recommended_articles": limited_recommended_articles,
             "recommendations_status": recommendations_status,
+            "risk_level_standard": hybrid_risk_standard,
+            "crisis_resources": crisis_resources,
         }
         
     except HTTPException:
@@ -5998,3 +6055,184 @@ def get_screening_history(
     except Exception as e:
         logger.error(f"Error fetching screening history: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error fetching screening history: {str(e)}")
+
+
+# ==================== CRISIS RESOURCES API ENDPOINTS ====================
+
+@app.post("/crisis-resources/recommend", response_model=List[CrisisResourceOut])
+def recommend_crisis_resources(
+    request: CrisisResourceRecommendRequest
+):
+    """
+    Get recommended crisis resources based on risk level, location, and city.
+    Returns resources sorted by distance (if coordinates provided) or by priority.
+    """
+    try:
+        # Apply fallbacks
+        city = request.city if request.city else "Kathmandu"
+        limit = request.limit if request.limit else 5
+        limit = max(1, min(10, limit))  # Clamp between 1 and 10
+        
+        # Get allowed types for risk level
+        allowed_types = risk_to_allowed_types(request.risk_level)
+        if not allowed_types:
+            return []
+        
+        # Normalize risk level for array matching
+        risk_level_upper = request.risk_level.upper().strip()
+        
+        with Session(engine) as session:
+            # Build query
+            query = session.query(CrisisResource).filter(
+                CrisisResource.is_active == True,
+                CrisisResource.type.in_(allowed_types)
+            )
+            
+            # Filter by city (case-insensitive)
+            city_filter = CrisisResource.city.ilike(f"%{city}%")
+            query = query.filter(city_filter)
+            
+            # Filter by risk_supported array containing the risk level
+            # PostgreSQL array containment: use contains method
+            query = query.filter(
+                CrisisResource.risk_supported.contains([risk_level_upper])
+            )
+            
+            # Execute query
+            resources = query.all()
+            
+            # If no results for the city, fallback to Kathmandu
+            if not resources and city.lower() != "kathmandu":
+                query = session.query(CrisisResource).filter(
+                    CrisisResource.is_active == True,
+                    CrisisResource.type.in_(allowed_types),
+                    CrisisResource.city.ilike("%Kathmandu%")
+                )
+                query = query.filter(
+                    CrisisResource.risk_supported.contains([risk_level_upper])
+                )
+                resources = query.all()
+            
+            # Calculate distances and prepare results
+            results = []
+            for resource in resources:
+                distance_km = None
+                if request.lat is not None and request.lng is not None:
+                    distance_km = haversine_distance(
+                        request.lat,
+                        request.lng,
+                        resource.lat,
+                        resource.lng
+                    )
+                
+                results.append({
+                    "id": resource.id,
+                    "name": resource.name,
+                    "type": resource.type,
+                    "province": resource.province,
+                    "city": resource.city,
+                    "address": resource.address,
+                    "phone": resource.phone,
+                    "hotline": resource.hotline,
+                    "website": resource.website,
+                    "hours": resource.hours,
+                    "description": resource.description,
+                    "lat": resource.lat,
+                    "lng": resource.lng,
+                    "risk_supported": resource.risk_supported or [],
+                    "is_active": resource.is_active,
+                    "distance_km": distance_km
+                })
+            
+            # Sort results
+            if request.lat is not None and request.lng is not None:
+                # Sort by distance (None distances at the end)
+                results.sort(key=lambda x: (x["distance_km"] is None, x["distance_km"] or float('inf')))
+            else:
+                # Sort by hotline (desc) then name (asc)
+                results.sort(key=lambda x: (-x["hotline"], x["name"]))
+            
+            # Return top limit
+            return results[:limit]
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error recommending crisis resources: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error recommending crisis resources: {str(e)}")
+
+
+@app.get("/crisis-resources", response_model=List[CrisisResourceOut])
+def get_crisis_resources(
+    city: Optional[str] = Query(None, description="Filter by city (default: Kathmandu)"),
+    type: Optional[str] = Query(None, description="Filter by resource type"),
+    risk_level: Optional[str] = Query(None, description="Filter by risk level (LOW, MEDIUM, HIGH, CRITICAL)"),
+    hotline: Optional[bool] = Query(None, description="Filter by hotline status")
+):
+    """
+    Get all crisis resources with optional filters.
+    No distance calculation - simple filtering only.
+    """
+    try:
+        # Apply defaults
+        filter_city = city if city else "Kathmandu"
+        
+        with Session(engine) as session:
+            # Build query
+            query = session.query(CrisisResource).filter(
+                CrisisResource.is_active == True
+            )
+            
+            # Filter by city
+            query = query.filter(CrisisResource.city.ilike(f"%{filter_city}%"))
+            
+            # Filter by type if provided
+            if type:
+                query = query.filter(CrisisResource.type.ilike(f"%{type}%"))
+            
+            # Filter by risk_level if provided
+            if risk_level:
+                risk_level_upper = risk_level.upper().strip()
+                query = query.filter(
+                    CrisisResource.risk_supported.contains([risk_level_upper])
+                )
+            
+            # Filter by hotline if provided
+            if hotline is not None:
+                query = query.filter(CrisisResource.hotline == hotline)
+            
+            # Execute query
+            resources = query.all()
+            
+            # Prepare results
+            results = []
+            for resource in resources:
+                results.append({
+                    "id": resource.id,
+                    "name": resource.name,
+                    "type": resource.type,
+                    "province": resource.province,
+                    "city": resource.city,
+                    "address": resource.address,
+                    "phone": resource.phone,
+                    "hotline": resource.hotline,
+                    "website": resource.website,
+                    "hours": resource.hours,
+                    "description": resource.description,
+                    "lat": resource.lat,
+                    "lng": resource.lng,
+                    "risk_supported": resource.risk_supported or [],
+                    "is_active": resource.is_active,
+                    "distance_km": None  # No distance calculation for this endpoint
+                })
+            
+            # Sort by hotline (desc) then name (asc)
+            results.sort(key=lambda x: (-x["hotline"], x["name"]))
+            
+            return results
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching crisis resources: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error fetching crisis resources: {str(e)}")
