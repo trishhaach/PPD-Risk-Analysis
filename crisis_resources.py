@@ -19,7 +19,9 @@ def risk_to_allowed_types(risk_level: str) -> List[str]:
     
     mapping = {
         "LOW": ["wellness"],
+        # Treat MODERATE as MEDIUM to be tolerant of different labels
         "MEDIUM": ["counseling", "wellness"],
+        "MODERATE": ["counseling", "wellness"],
         "HIGH": ["hospital", "counseling", "helpline", "emergency"],
         "CRITICAL": ["hospital", "counseling", "helpline", "emergency"],
     }

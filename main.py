@@ -7180,13 +7180,16 @@ def recommend_crisis_resources(
         limit = request.limit if request.limit else 5
         limit = max(1, min(10, limit))  # Clamp between 1 and 10
         
-        # Get allowed types for risk level
-        allowed_types = risk_to_allowed_types(request.risk_level)
+        # Normalize risk level for array matching and handle synonyms (e.g. MODERATE → MEDIUM)
+        raw_risk = request.risk_level or ""
+        risk_level_upper = raw_risk.upper().strip()
+        if risk_level_upper == "MODERATE":
+            risk_level_upper = "MEDIUM"
+
+        # Get allowed types for risk level using standardized value
+        allowed_types = risk_to_allowed_types(risk_level_upper)
         if not allowed_types:
             return []
-        
-        # Normalize risk level for array matching
-        risk_level_upper = request.risk_level.upper().strip()
         
         with Session(engine) as session:
             # Build query
