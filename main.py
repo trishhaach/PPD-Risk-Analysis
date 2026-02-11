@@ -39,7 +39,7 @@ from jose import JWTError, jwt
 from sqlmodel import Session
 from sqlalchemy.dialects.postgresql import array
 
-from database import init_db, engine
+from database import init_db, engine, SessionLocal
 from hybrid import HybridScreener
 from crisis_resources import risk_to_allowed_types, haversine_distance
 from utils.risk_mapping import epds_to_risk_level, hybrid_to_risk_level, ml_probability_to_risk_level, ML_CRITICAL_THRESHOLD
@@ -1290,8 +1290,10 @@ def submit_epds_screening(
         # Store result in database
         crisis_resources = None
         recommended_resource_ids = None
+        epds_id = None
+        epds_created_at_str = None
         
-        with Session(engine) as session:
+        with SessionLocal() as session:
             epds_result = EPDSResult(
                 user_id=current_user.id,
                 q1=answers.q1,
@@ -1309,8 +1311,10 @@ def submit_epds_screening(
             )
             
             session.add(epds_result)
-            session.commit()
-            session.refresh(epds_result)
+            # Ensure primary key and timestamps are populated without committing
+            session.flush()
+            epds_id = epds_result.id
+            epds_created_at_str = epds_result.created_at.isoformat() if epds_result.created_at else None
             
             # Fetch crisis resources if requested and store IDs
             if answers.include_crisis_resources:
@@ -1327,8 +1331,6 @@ def submit_epds_screening(
                     if crisis_resources:
                         recommended_resource_ids = [r.id for r in crisis_resources]
                         epds_result.recommended_resource_ids = recommended_resource_ids
-                        session.add(epds_result)
-                        session.commit()
                     else:
                         # Empty list when computed but no results
                         recommended_resource_ids = []
@@ -1340,6 +1342,9 @@ def submit_epds_screening(
                     crisis_resources = []
                     recommended_resource_ids = []
             
+            # Commit once at the end
+            session.commit()
+        
         # Build symptoms_text for recommendation service (simple summary based on EPDS)
         symptoms_text = f"EPDS total score {total_score}, risk level {risk_level}."
 
@@ -1348,7 +1353,7 @@ def submit_epds_screening(
             recommended_articles, recommendations_status = _fetch_and_store_article_recommendations(
                 user_id=current_user.id,
                 screening_type="epds",
-                screening_id=epds_result.id,
+                screening_id=epds_id,
                 risk_level=risk_level,
                 symptoms_text=symptoms_text,
                 top_n=5,
@@ -1367,7 +1372,7 @@ def submit_epds_screening(
         return {
             "message": "EPDS screening completed successfully",
             "result": {
-                "id": epds_result.id,
+                "id": epds_id,
                 "total_score": total_score,
                 "risk_level": risk_level,
                 "answers": {
@@ -1382,7 +1387,7 @@ def submit_epds_screening(
                     "q9": answers.q9,
                     "q10": answers.q10,
                 },
-                "created_at": epds_result.created_at.isoformat()
+                "created_at": epds_created_at_str,
             },
             "interpretation": {
                 "low": "Score 0-9: Low risk of postpartum depression",
@@ -2142,8 +2147,10 @@ def assess_ppd_risk(
         # Store in DB
         crisis_resources = None
         recommended_resource_ids = None
+        assessment_id = None
+        assessment_created_at_str = None
         
-        with Session(engine) as session:
+        with SessionLocal() as session:
             record = PPDRiskAssessment(
                 user_id=current_user.id,
                 ml_endpoint=predict_url,
@@ -2151,8 +2158,10 @@ def assess_ppd_risk(
                 ml_response_json=json.dumps(ml_result),
             )
             session.add(record)
-            session.commit()
-            session.refresh(record)
+            # Flush so that primary key and timestamps are populated
+            session.flush()
+            assessment_id = record.id
+            assessment_created_at_str = record.created_at.isoformat() if record.created_at else None
             
             # Fetch crisis resources if requested and store IDs
             if payload.include_crisis_resources:
@@ -2169,8 +2178,6 @@ def assess_ppd_risk(
                     if crisis_resources:
                         recommended_resource_ids = [r.id for r in crisis_resources]
                         record.recommended_resource_ids = recommended_resource_ids
-                        session.add(record)
-                        session.commit()
                     else:
                         # Empty list when computed but no results
                         recommended_resource_ids = []
@@ -2181,6 +2188,9 @@ def assess_ppd_risk(
                     )
                     crisis_resources = []
                     recommended_resource_ids = []
+            
+            # Commit once at the end
+            session.commit()
 
         # Build symptoms_text from symptom questionnaire answers for recommendations
         symptoms_parts: List[str] = []
@@ -2204,7 +2214,7 @@ def assess_ppd_risk(
             recommended_articles, recommendations_status = _fetch_and_store_article_recommendations(
                 user_id=current_user.id,
                 screening_type="ppd",
-                screening_id=record.id,
+                screening_id=assessment_id,
                 risk_level=risk_level_for_reco,
                 symptoms_text=symptoms_text,
                 top_n=5,
@@ -2221,9 +2231,9 @@ def assess_ppd_risk(
         limited_recommended_articles = recommended_articles[:2] if recommended_articles else []
 
         return {
-            "id": f"ppd_risk_{record.id}",
+            "id": f"ppd_risk_{assessment_id}",
             "result": ml_result,
-            "createdAt": record.created_at.isoformat(),
+            "createdAt": assessment_created_at_str,
             "risk_level_standard": risk_level_standard,
             "recommended_articles": limited_recommended_articles,
             "recommendations_status": recommendations_status,
@@ -2484,9 +2494,8 @@ def _extract_ml_probability(ml_result: dict) -> float:
         200: {
             "description": "Hybrid screening result with optional crisis resources",
             "content": {
-                "application/json": {
+                    "application/json": {
                     "example": {
-                        "id": 456,
                         "risk_label": "High",
                         "risk_level_standard": "HIGH",
                         "final_probability": 0.75,
@@ -2499,13 +2508,13 @@ def _extract_ml_probability(ml_result: dict) -> float:
                             "ml_probability": 0.72,
                             "fusion_score": 0.75
                         },
-                        "epds_data": {
-                            "total_score": 15,
-                            "risk_level": "High"
+                        "audit": {
+                            "timestamp": "2026-02-07T10:30:00",
+                            "decision_path": ["EPDS_HIGH", "ML_HIGH"],
+                            "is_discordant": False,
+                            "uncertainty_flag": False
                         },
-                        "ppd_data": {
-                            "ml_probability": 0.72
-                        },
+                        "system_disclaimer": "Screening aid only. Consult clinical guidelines.",
                         "recommended_articles": [
                             {
                                 "article_id": "art_005",
@@ -2543,8 +2552,7 @@ def _extract_ml_probability(ml_result: dict) -> float:
                                 "distance_km": 1.2
                             }
                         ],
-                        "recommended_resource_ids": ["CR001", "CR002"],
-                        "created_at": "2026-02-07T10:30:00"
+                        "recommended_resource_ids": ["CR001", "CR002"]
                     }
                 }
             }
@@ -2636,7 +2644,11 @@ def perform_hybrid_screening(
             recommendation = "Routine postpartum care."
         
         # Step 4: Store both EPDS and PPD risk assessment records for history
-        with Session(engine) as session:
+        epds_id = None
+        crisis_resources = None
+        recommended_resource_ids = None
+        
+        with SessionLocal() as session:
             # Calculate EPDS-specific risk level for storage
             epds_total = sum(request.epds_responses)
             q10_score = request.epds_responses[9]
@@ -2677,12 +2689,11 @@ def perform_hybrid_screening(
                 ml_response_json=json.dumps(ml_result),
             )
             session.add(ppd_record)
-            session.commit()
-            session.refresh(epds_result)
+            # Flush to ensure primary keys are available without committing
+            session.flush()
+            epds_id = epds_result.id
             
             # Fetch crisis resources if requested and store IDs
-            crisis_resources = None
-            recommended_resource_ids = None
             if request.include_crisis_resources:
                 try:
                     crisis_resources = get_recommended_crisis_resources(
@@ -2697,8 +2708,6 @@ def perform_hybrid_screening(
                     if crisis_resources:
                         recommended_resource_ids = [r.id for r in crisis_resources]
                         epds_result.recommended_resource_ids = recommended_resource_ids
-                        session.add(epds_result)
-                        session.commit()
                     else:
                         # Empty list when computed but no results
                         recommended_resource_ids = []
@@ -2709,6 +2718,9 @@ def perform_hybrid_screening(
                     )
                     crisis_resources = []
                     recommended_resource_ids = []
+            
+            # Commit once at the end
+            session.commit()
 
         # Build symptoms_text from symptom questionnaire answers for recommendations
         symptoms_parts: List[str] = []
@@ -2722,7 +2734,7 @@ def perform_hybrid_screening(
             recommended_articles, recommendations_status = _fetch_and_store_article_recommendations(
                 user_id=current_user.id,
                 screening_type="hybrid",
-                screening_id=epds_result.id,
+                screening_id=epds_id,
                 risk_level=result.risk_label.value,
                 symptoms_text=symptoms_text,
                 top_n=5,
@@ -7180,16 +7192,13 @@ def recommend_crisis_resources(
         limit = request.limit if request.limit else 5
         limit = max(1, min(10, limit))  # Clamp between 1 and 10
         
-        # Normalize risk level for array matching and handle synonyms (e.g. MODERATE → MEDIUM)
-        raw_risk = request.risk_level or ""
-        risk_level_upper = raw_risk.upper().strip()
-        if risk_level_upper == "MODERATE":
-            risk_level_upper = "MEDIUM"
-
-        # Get allowed types for risk level using standardized value
-        allowed_types = risk_to_allowed_types(risk_level_upper)
+        # Get allowed types for risk level
+        allowed_types = risk_to_allowed_types(request.risk_level)
         if not allowed_types:
             return []
+        
+        # Normalize risk level for array matching
+        risk_level_upper = request.risk_level.upper().strip()
         
         with Session(engine) as session:
             # Build query

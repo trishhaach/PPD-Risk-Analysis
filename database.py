@@ -1,10 +1,20 @@
 from sqlmodel import SQLModel, create_engine, Session
+from sqlalchemy.orm import sessionmaker
 import logging
 
 logger = logging.getLogger(__name__)
 
 DATABASE_URL = "postgresql://postgres.brirytbelvtylkljscgv:FIRSTDECEMBER2002@aws-1-us-east-1.pooler.supabase.com:5432/postgres"
 engine = create_engine(DATABASE_URL, echo=False)
+
+# Global session factory with expire_on_commit disabled so that instances
+# remain usable after commit without triggering DetachedInstanceError.
+SessionLocal = sessionmaker(
+    bind=engine,
+    autocommit=False,
+    autoflush=False,
+    expire_on_commit=False,
+)
 
 def init_db():
     try:

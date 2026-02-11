@@ -1070,7 +1070,7 @@ class EPDSHistoryResponseSchema(BaseModel):
 
 
 class EPDSResultDetailSchema(BaseModel):
-    id: str
+    id: int
     q1: int
     q2: int
     q3: int
