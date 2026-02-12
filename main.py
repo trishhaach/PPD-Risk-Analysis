@@ -1344,7 +1344,7 @@ def submit_epds_screening(
             
             # Commit once at the end
             session.commit()
-        
+            
         # Build symptoms_text for recommendation service (simple summary based on EPDS)
         symptoms_text = f"EPDS total score {total_score}, risk level {risk_level}."
 
@@ -2494,7 +2494,7 @@ def _extract_ml_probability(ml_result: dict) -> float:
         200: {
             "description": "Hybrid screening result with optional crisis resources",
             "content": {
-                    "application/json": {
+                "application/json": {
                     "example": {
                         "risk_label": "High",
                         "risk_level_standard": "HIGH",

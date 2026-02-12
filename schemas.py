@@ -1070,20 +1070,17 @@ class EPDSHistoryResponseSchema(BaseModel):
 
 
 class EPDSResultDetailSchema(BaseModel):
+    """
+    Detailed EPDS result as returned by GET /epds-screen/{result_id}.
+    Matches the actual response shape used by the endpoint, where
+    question scores are nested under an `answers` object.
+    """
     id: int
-    q1: int
-    q2: int
-    q3: int
-    q4: int
-    q5: int
-    q6: int
-    q7: int
-    q8: int
-    q9: int
-    q10: int
     total_score: int
     risk_level: str
+    answers: EPDSAnswersSchema
     created_at: str
+    crisis_resources: Optional[List["CrisisResourceMiniOut"]] = None
 
 
 class ScreeningCountResponseSchema(BaseModel):
