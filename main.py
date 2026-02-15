@@ -2144,7 +2144,14 @@ def assess_ppd_risk(
             raise HTTPException(status_code=503, detail="ML service is unavailable")
 
         # Extract ML probability and standardize risk level
-        ml_probability = ml_result.get("probability", 0.0) if isinstance(ml_result, dict) else 0.0
+        try:
+            ml_probability = _extract_ml_probability(ml_result)
+        except ValueError:
+            logger.warning("Could not extract probability from ML response, defaulting to 0.0")
+            ml_probability = 0.0
+
+        logger.info(f"PPD Risk Assessment: Extracted probability={ml_probability}, Keys found={list(ml_result.keys()) if isinstance(ml_result, dict) else 'Not Dict'}")
+
         risk_level_standard = ml_probability_to_risk_level(ml_probability)
         # If probability >= CRITICAL threshold, upgrade to CRITICAL
         if ml_probability >= ML_CRITICAL_THRESHOLD:

@@ -35,11 +35,11 @@ def get_risk_supported_for_type(resource_type: str) -> list:
     """
     type_to_risks = {
         "wellness": ["LOW"],
-        "counseling": ["MEDIUM", "HIGH", "CRITICAL"],
+        "counseling": ["MEDIUM"],
+        "community_support": ["MEDIUM"],
         "helpline": ["HIGH", "CRITICAL"],
         "hospital": ["HIGH", "CRITICAL"],
         "emergency": ["CRITICAL"],
-        "community_support": ["LOW", "MEDIUM"],
     }
     
     # Default: if type not found, support all risk levels
@@ -48,7 +48,8 @@ def get_risk_supported_for_type(resource_type: str) -> list:
 
 def seed():
     """Seed crisis resources from JSON file."""
-    json_path = os.path.join(os.path.dirname(__file__), "data", "crisis_resources_seed.json")
+    json_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "crisis_resources_seed.json")
+
     
     if not os.path.exists(json_path):
         print(f"Error: JSON file not found at {json_path}")
