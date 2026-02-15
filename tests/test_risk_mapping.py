@@ -34,7 +34,7 @@ def test_epds_mapping():
         print(f"[{status}] {description}")
         print(f"   Expected: {expected}, Got: {result}")
     
-    return all_passed
+    assert all_passed
 
 
 def test_hybrid_mapping():
@@ -63,7 +63,7 @@ def test_hybrid_mapping():
         print(f"[{status}] {description}")
         print(f"   Expected: {expected}, Got: {result}")
     
-    return all_passed
+    assert all_passed
 
 
 if __name__ == "__main__":
