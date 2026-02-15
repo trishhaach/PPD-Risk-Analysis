@@ -2,7 +2,56 @@
 Quick verification script for risk mapping functions.
 Run with: python test_risk_mapping.py
 """
-from utils.risk_mapping import epds_to_risk_level, hybrid_to_risk_level
+from utils.risk_mapping import epds_to_risk_level, hybrid_to_risk_level, prediction_to_standard, ml_probability_to_risk_level, ML_CRITICAL_THRESHOLD
+
+
+def test_prediction_standardization():
+    """Test prediction string standardization logic"""
+    print("\n" + "=" * 60)
+    print("Testing Prediction Standardization")
+    print("=" * 60)
+    
+    test_cases = [
+        ("HIGH RISK", "HIGH", "Prediction 'HIGH RISK' -> HIGH"),
+        ("critical level", "CRITICAL", "Prediction 'critical level' -> CRITICAL"),
+        ("Low Risk", "LOW", "Prediction 'Low Risk' -> LOW"),
+        ("Medium", "MEDIUM", "Prediction 'Medium' -> MEDIUM"),
+        ("Unknown", None, "Prediction 'Unknown' -> None"),
+        ("", None, "Empty prediction -> None"),
+    ]
+
+    all_passed = True
+    for pred, expected, description in test_cases:
+        result = prediction_to_standard(pred)
+        status = "PASS" if result == expected else "FAIL"
+        if result != expected:
+            all_passed = False
+        print(f"[{status}] {description}")
+        print(f"   Expected: {expected}, Got: {result}")
+    
+    # Specific scenario requested: 
+    # ML mock: {"prediction":"HIGH RISK","risk_probability":0.49,"threshold_used":0.41}
+    # Assert risk_level_standard == "HIGH".
+    print("\n[TEST SCENARIO] High Risk Label with Low Probability")
+    mock_ml_result = {"prediction": "HIGH RISK", "risk_probability": 0.49}
+    ml_probability = 0.49
+    ml_pred_raw = mock_ml_result.get("prediction")
+    
+    pred_std = prediction_to_standard(ml_pred_raw)
+    if pred_std:
+        risk_level_standard = pred_std
+    else:
+        risk_level_standard = ml_probability_to_risk_level(ml_probability)
+        if ml_probability >= ML_CRITICAL_THRESHOLD:
+            risk_level_standard = "CRITICAL"
+            
+    if risk_level_standard == "HIGH":
+        print("[PASS] Scenario Logic Correct: risk_level_standard == 'HIGH'")
+    else:
+        print(f"[FAIL] Scenario Logic Incorrect: Got {risk_level_standard}")
+        all_passed = False
+
+    assert all_passed
 
 
 def test_epds_mapping():
@@ -35,6 +84,7 @@ def test_epds_mapping():
         print(f"   Expected: {expected}, Got: {result}")
     
     assert all_passed
+    return all_passed
 
 
 def test_hybrid_mapping():
@@ -64,6 +114,7 @@ def test_hybrid_mapping():
         print(f"   Expected: {expected}, Got: {result}")
     
     assert all_passed
+    return all_passed
 
 
 if __name__ == "__main__":
@@ -73,6 +124,12 @@ if __name__ == "__main__":
     
     epds_passed = test_epds_mapping()
     hybrid_passed = test_hybrid_mapping()
+    try:
+        test_prediction_standardization()
+        print("[PASS] Prediction Standardization")
+    except AssertionError:
+        print("[FAIL] Prediction Standardization")
+        hybrid_passed = False # Flag overall failure
     
     print("\n" + "=" * 60)
     if epds_passed and hybrid_passed:

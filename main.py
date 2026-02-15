@@ -42,7 +42,7 @@ from sqlalchemy.dialects.postgresql import array
 from database import init_db, engine, SessionLocal
 from hybrid import HybridScreener
 from crisis_resources import risk_to_allowed_types, haversine_distance
-from utils.risk_mapping import epds_to_risk_level, hybrid_to_risk_level, ml_probability_to_risk_level, ML_CRITICAL_THRESHOLD
+from utils.risk_mapping import epds_to_risk_level, hybrid_to_risk_level, ml_probability_to_risk_level, prediction_to_standard, ML_CRITICAL_THRESHOLD
 from services.crisis_resources_service import get_recommended_crisis_resources, get_resources_by_ids
 from models import (
     User,
@@ -2144,18 +2144,27 @@ def assess_ppd_risk(
             raise HTTPException(status_code=503, detail="ML service is unavailable")
 
         # Extract ML probability and standardize risk level
+        # Extract ML probability (still needed for logging and fallback)
         try:
             ml_probability = _extract_ml_probability(ml_result)
         except ValueError:
             logger.warning("Could not extract probability from ML response, defaulting to 0.0")
             ml_probability = 0.0
 
-        logger.info(f"PPD Risk Assessment: Extracted probability={ml_probability}, Keys found={list(ml_result.keys()) if isinstance(ml_result, dict) else 'Not Dict'}")
+        # Determine risk level from prediction label if possible
+        ml_pred_raw = ml_result.get("prediction", "") if isinstance(ml_result, dict) else ""
+        pred_std = prediction_to_standard(ml_pred_raw)
 
-        risk_level_standard = ml_probability_to_risk_level(ml_probability)
-        # If probability >= CRITICAL threshold, upgrade to CRITICAL
-        if ml_probability >= ML_CRITICAL_THRESHOLD:
-            risk_level_standard = "CRITICAL"
+        if pred_std:
+            risk_level_standard = pred_std
+        else:
+            # Fallback to probability-based mapping
+            risk_level_standard = ml_probability_to_risk_level(ml_probability)
+            # CRITICAL upgrade rule applies in fallback path
+            if ml_probability >= ML_CRITICAL_THRESHOLD:
+                risk_level_standard = "CRITICAL"
+
+        logger.info(f"PPD Risk Assessment: Prediction='{ml_pred_raw}', Prob={ml_probability:.4f}, Threshold={ML_CRITICAL_THRESHOLD}, Final Risk={risk_level_standard}")
         
         # Store in DB
         crisis_resources = None

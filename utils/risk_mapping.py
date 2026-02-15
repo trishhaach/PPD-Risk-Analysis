@@ -67,6 +67,25 @@ def ml_probability_to_risk_level(ml_probability: float) -> str:
         return "HIGH"
 
 
+def prediction_to_standard(pred: str) -> str | None:
+    """
+    Normalize ML prediction string to standard risk level.
+    Case-insensitive matching.
+    """
+    if not pred:
+        return None
+    pred_s = pred.lower()
+    if "critical" in pred_s:
+        return "CRITICAL"
+    elif "high" in pred_s:
+        return "HIGH"
+    elif "medium" in pred_s:
+        return "MEDIUM"
+    elif "low" in pred_s:
+        return "LOW"
+    return None
+
+
 def hybrid_to_risk_level(epds_risk: str, ml_probability: float, q10_score: int) -> str:
     """
     Convert EPDS risk, ML probability, and Q10 score to final hybrid risk level.

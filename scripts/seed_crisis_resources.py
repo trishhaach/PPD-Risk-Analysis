@@ -33,17 +33,23 @@ def get_risk_supported_for_type(resource_type: str) -> list:
     Returns:
         List of risk levels this resource type supports
     """
+    # Create the mapping for risk levels
     type_to_risks = {
         "wellness": ["LOW"],
         "counseling": ["MEDIUM"],
-        "community_support": ["MEDIUM"],
+        "hospital": ["MEDIUM", "HIGH", "CRITICAL"],
         "helpline": ["HIGH", "CRITICAL"],
-        "hospital": ["HIGH", "CRITICAL"],
-        "emergency": ["CRITICAL"],
+        "emergency": ["HIGH", "CRITICAL"],
+        "community_support": [],
     }
     
-    # Default: if type not found, support all risk levels
-    return type_to_risks.get(resource_type, ["LOW", "MEDIUM", "HIGH", "CRITICAL"])
+    # Default: if type not found, interpret carefully (e.g. empty)
+    risk_supported = type_to_risks.get(resource_type, [])
+    
+    # Print the mapping as requested
+    print(f"{resource_type} -> {risk_supported}")
+    
+    return risk_supported
 
 
 def seed():
