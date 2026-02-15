@@ -663,7 +663,9 @@ def log_partner_access(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    init_db()
+    # Skip heavy initialization during tests to speed up execution
+    if os.getenv("SAKHI_TESTING") != "1":
+        init_db()
     yield
 
 app = FastAPI(lifespan=lifespan)
@@ -1397,7 +1399,11 @@ def submit_epds_screening(
             "recommended_articles": limited_recommended_articles,
             "recommendations_status": recommendations_status,
             "risk_level_standard": standardized_risk,
-            "crisis_resources": [r.model_dump() for r in crisis_resources] if crisis_resources else None,
+            "crisis_resources": (
+                ([r.model_dump() for r in crisis_resources] if crisis_resources else [])
+                if answers.include_crisis_resources
+                else None
+            ),
             "recommended_resource_ids": recommended_resource_ids,
         }
     except HTTPException:
