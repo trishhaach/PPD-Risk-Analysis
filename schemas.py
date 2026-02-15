@@ -1078,7 +1078,7 @@ class EPDSResultDetailSchema(BaseModel):
     id: int
     total_score: int
     risk_level: str
-    answers: EPDSAnswersSchema
+    answers: "EPDSAnswersSchema"
     created_at: str
     crisis_resources: Optional[List["CrisisResourceMiniOut"]] = None
 
